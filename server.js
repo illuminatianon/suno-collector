@@ -17,6 +17,9 @@ Use Refresh to pick up newly captured songs; search matches titles and Load more
 Select a song for full lyrics and metadata; Full captured JSON exposes every field without loading remote media.
 The UI uses an independent process-local read-only token from GET /api/session.
 GET /api/library?limit=100&offset=0&q=title lists songs; GET /api/library/<id> returns all clip data.
+GET /api/library/timeline returns UTC day counts, first_date, last_date, and total (including undated songs).
+Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive; either is optional.
+Date boundaries must be real calendar dates with from < to; dated queries omit unparseable/undated songs.
 Then reload Suno once and browse Library manually. The adapter does not scroll or request songs.
 Console prefix: [Suno collector]. Violentmonkey menu: status, pause/resume delivery, retry.
 Offline captures persist in extension storage; retries contact only localhost every 15 seconds.
@@ -58,13 +61,25 @@ db.prepare('INSERT OR IGNORE INTO settings VALUES (?, ?)').run('ingress_token', 
 const token = db.prepare('SELECT value FROM settings WHERE key=?').get('ingress_token').value;
 const readToken = randomBytes(32).toString('hex');
 const distPath = fileURLToPath(new URL('./dist/', import.meta.url));
-const libraryCount = db.prepare("SELECT count(*) AS n FROM songs WHERE coalesce(title, '') LIKE ? ESCAPE '\\'");
+// Validate the stored calendar part before UTC conversion: SQLite normalizes dates such as February 30.
+const songDate = `CASE
+  WHEN date(substr(created_at, 1, 10), '+0 days') = substr(created_at, 1, 10)
+  THEN date(created_at) END`;
+const libraryWhere = `coalesce(title, '') LIKE ? ESCAPE '\\'
+  AND (? IS NULL OR ${songDate} >= ?)
+  AND (? IS NULL OR ${songDate} < ?)`;
+const libraryCount = db.prepare(`SELECT count(*) AS n FROM songs WHERE ${libraryWhere}`);
 const totalCount = db.prepare('SELECT count(*) AS n FROM songs');
+const timelineDays = db.prepare(`
+  SELECT ${songDate} AS date, count(*) AS count
+  FROM songs WHERE ${songDate} IS NOT NULL
+  GROUP BY ${songDate} ORDER BY date ASC
+`);
 const libraryRows = db.prepare(`
   SELECT id, title, user_id, created_at, model_name, status,
     coalesce(json_extract(raw_json, '$.metadata.duration'), json_extract(raw_json, '$.duration')) AS duration,
     coalesce(json_extract(raw_json, '$.metadata.tags'), json_extract(raw_json, '$.tags')) AS tags
-  FROM songs WHERE coalesce(title, '') LIKE ? ESCAPE '\\'
+  FROM songs WHERE ${libraryWhere}
   ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
 `);
 const librarySong = db.prepare('SELECT raw_json, first_captured_at, updated_at FROM songs WHERE id=?');
@@ -182,14 +197,33 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && (url.pathname === '/api/library' || url.pathname.startsWith('/api/library/'))) {
       if (!authorized(req, readToken) && !authorized(req)) return send(res, 401, { error: 'Bearer token required' });
+      if (url.pathname === '/api/library/timeline') {
+        const days = timelineDays.all();
+        return send(res, 200, {
+          days,
+          first_date: days[0]?.date ?? null,
+          last_date: days.at(-1)?.date ?? null,
+          total: totalCount.get().n,
+        });
+      }
       if (url.pathname === '/api/library') {
         const limit = pageInteger(url.searchParams, 'limit', 100, 1, 200);
         const offset = pageInteger(url.searchParams, 'offset', 0, 0, Number.MAX_SAFE_INTEGER);
         if (limit === null || offset === null) return send(res, 400, { error: 'limit must be an integer 1..200; offset must be a nonnegative safe integer' });
+        const from = url.searchParams.get('from');
+        const to = url.searchParams.get('to');
+        const validDate = value => value === null || (
+          /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+          Number.isFinite(Date.parse(value + 'T00:00:00Z')) &&
+          new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) === value
+        );
+        if (!validDate(from) || !validDate(to) || (from !== null && to !== null && from >= to)) {
+          return send(res, 400, { error: 'from/to must be real YYYY-MM-DD calendar dates with from < to' });
+        }
         const query = '%' + (url.searchParams.get('q') || '').replace(/[\\%_]/g, '\\$&') + '%';
         return send(res, 200, {
-          songs: libraryRows.all(query, limit, offset),
-          total: libraryCount.get(query).n,
+          songs: libraryRows.all(query, from, from, to, to, limit, offset),
+          total: libraryCount.get(query, from, from, to, to).n,
           total_songs: totalCount.get().n,
         });
       }

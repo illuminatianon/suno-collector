@@ -96,3 +96,132 @@ import { DatabaseSync } from 'node:sqlite';
   });
   readDb.close();
 });
+
+test('UTC timeline and date-filtered library agree for an isolated archive', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'suno-timeline-test-'));
+  const probe = net.createServer();
+  probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  const dbPath = join(directory, 'songs.sqlite');
+  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data; });
+  let readDb;
+  t.after(async () => {
+    readDb?.close();
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Server startup timeout: ' + stderr)), 10000);
+    child.stdout.on('data', data => { if (String(data).includes('Install in Violentmonkey:')) { clearTimeout(timer); resolve(); } });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`Server exited ${code}: ${stderr}`)); });
+  });
+  const base = `http://127.0.0.1:${port}`;
+  readDb = new DatabaseSync(dbPath);
+  const token = readDb.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value;
+  const ingressHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const session = await (await fetch(base + '/api/session')).json();
+  const readHeaders = { Authorization: `Bearer ${session.token}` };
+  const get = path => fetch(base + path, { headers: readHeaders });
+  const library = async query => {
+    const response = await get('/api/library?' + query);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+
+  await t.test('timeline uses existing read authorization and handles an empty archive', async () => {
+    assert.equal((await fetch(base + '/api/library/timeline')).status, 401);
+    assert.equal((await fetch(base + '/api/library/timeline', { headers: { Authorization: 'Bearer incorrect' } })).status, 401);
+    assert.equal((await fetch(base + '/api/library?from=2024-01-01')).status, 401);
+    const expected = { days: [], first_date: null, last_date: null, total: 0 };
+    assert.deepEqual(await (await get('/api/library/timeline')).json(), expected);
+    assert.deepEqual(await (await fetch(base + '/api/library/timeline', { headers: ingressHeaders })).json(), expected);
+  });
+
+  const clips = [
+    { id: 'year-before', title: 'Year end', created_at: '2023-12-31T23:59:59Z' },
+    { id: 'year-after', title: 'Year start', created_at: '2024-01-01T00:00:00Z' },
+    { id: 'offset-back', title: 'UTC previous year', created_at: '2024-01-01T00:30:00+01:00' },
+    { id: 'leap-before', title: 'Pulse', created_at: '2024-02-28T23:59:59.999Z' },
+    { id: 'leap-start', title: 'Pulse', created_at: '2024-02-29T00:00:00Z' },
+    { id: 'leap-late', title: 'Pulse', created_at: '2024-02-29T23:59:59.999Z' },
+    { id: 'offset-forward', title: 'UTC following day', created_at: '2024-02-29T23:30:00-01:00' },
+    { id: 'march-start', title: 'March', created_at: '2024-03-01T00:00:00Z' },
+    { id: 'null-date', title: 'Unknown', created_at: null },
+    { id: 'missing-date', title: 'Unknown' },
+    { id: 'malformed-date', title: 'Unknown', created_at: 'not-a-timestamp' },
+    { id: 'invalid-date', title: 'Unknown', created_at: '2024-02-30T00:00:00Z' },
+  ];
+  const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips }) });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).inserted, clips.length);
+
+  await t.test('aggregation returns only ordered UTC date counts with all-song total', async () => {
+    const timeline = await (await get('/api/library/timeline')).json();
+    assert.deepEqual(timeline, {
+      days: [
+        { date: '2023-12-31', count: 2 },
+        { date: '2024-01-01', count: 1 },
+        { date: '2024-02-28', count: 1 },
+        { date: '2024-02-29', count: 2 },
+        { date: '2024-03-01', count: 2 },
+      ],
+      first_date: '2023-12-31',
+      last_date: '2024-03-01',
+      total: 12,
+    });
+    for (const day of timeline.days) {
+      const next = new Date(day.date + 'T00:00:00Z');
+      next.setUTCDate(next.getUTCDate() + 1);
+      const page = await library(`from=${day.date}&to=${next.toISOString().slice(0, 10)}`);
+      assert.equal(page.total, day.count);
+      assert.equal(page.total_songs, 12);
+    }
+    const yearEnd = await library('from=2023-12-31&to=2024-01-01');
+    assert.deepEqual(yearEnd.songs.map(song => song.id).sort(), ['offset-back', 'year-before']);
+    const march = await library('from=2024-03-01&to=2024-03-02');
+    assert.deepEqual(march.songs.map(song => song.id).sort(), ['march-start', 'offset-forward']);
+  });
+
+  await t.test('optional boundaries exclude unknown dates only when filtering', async () => {
+    assert.deepEqual((await library('to=2024-01-01')).songs.map(song => song.id).sort(), ['offset-back', 'year-before']);
+    assert.deepEqual((await library('from=2024-03-01')).songs.map(song => song.id).sort(), ['march-start', 'offset-forward']);
+    const all = await library('');
+    assert.equal(all.total, 12);
+    assert.equal(all.total_songs, 12);
+    assert.deepEqual(all.songs.map(song => song.id).sort(), clips.map(clip => clip.id).sort());
+    const unknown = await library('q=Unknown');
+    assert.equal(unknown.total, 4);
+    assert.equal((await library('q=Unknown&from=2024-01-01')).total, 0);
+    assert.deepEqual(await library('from=2025-01-01&to=2025-01-02'), { songs: [], total: 0, total_songs: 12 });
+  });
+
+  await t.test('date and title filters compose with newest-first pagination and stable totals', async () => {
+    const query = 'from=2024-02-28&to=2024-03-01&q=Pulse&limit=1';
+    const first = await library(query);
+    const second = await library(query + '&offset=1');
+    const third = await library(query + '&offset=2');
+    assert.deepEqual([first.songs[0].id, second.songs[0].id, third.songs[0].id], ['leap-late', 'leap-start', 'leap-before']);
+    for (const page of [first, second, third]) {
+      assert.equal(page.total, 3);
+      assert.equal(page.total_songs, 12);
+    }
+    assert.deepEqual((await library(query + '&offset=3')).songs, []);
+    assert.deepEqual((await library('from=2024-02-29&to=2024-03-01')).songs.map(song => song.id), ['leap-late', 'leap-start']);
+  });
+
+  await t.test('calendar validation rejects malformed, impossible, equal and reversed ranges', async () => {
+    for (const query of [
+      'from=', 'to=', 'from=2024-2-29', 'to=2024-02-29T00:00:00Z',
+      'from=2023-02-29', 'to=1900-02-29', 'from=2100-02-29',
+      'from=2024-02-30', 'to=2024-04-31', 'from=2024-00-01', 'to=2024-13-01',
+      'from=2024-01-00', 'to=not-a-date',
+      'from=2024-02-29&to=2024-02-29', 'from=2024-03-01&to=2024-02-29',
+    ]) {
+      assert.equal((await get('/api/library?' + query)).status, 400, query);
+    }
+    assert.equal((await library('from=2000-02-29&to=2000-03-01')).total, 0);
+  });
+});

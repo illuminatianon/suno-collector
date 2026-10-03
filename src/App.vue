@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import MetadataValue from './MetadataValue.vue'
+import LibraryTimeline from './LibraryTimeline.vue'
 
 const songs = ref([])
 const total = ref(0)
@@ -15,6 +16,15 @@ const detailError = ref('')
 const mobileDetail = ref(false)
 const detailHeading = ref(null)
 const listHeading = ref(null)
+const view = ref('songs')
+const selectedDay = ref(null)
+const timeline = ref({ days: [], first_date: null, last_date: null, total: 0 })
+const timelineYear = ref(new Date().getUTCFullYear())
+const timelineLoading = ref(false)
+const timelineError = ref('')
+let timelineController = null
+let timelineSequence = 0
+let timelineInitialized = false
 let sessionToken = null
 let sessionPromise = null
 let listController = null
@@ -56,7 +66,14 @@ async function loadSongs(append = false) {
   listError.value = ''
   const offset = append ? songs.value.length : 0
   try {
-    const data = await api(`/api/library?${new URLSearchParams({ limit: '100', offset: String(offset), q: query.value })}`, listController.signal)
+    const params = new URLSearchParams({ limit: '100', offset: String(offset), q: query.value })
+    if (selectedDay.value) {
+      const next = new Date(`${selectedDay.value}T00:00:00Z`)
+      next.setUTCDate(next.getUTCDate() + 1)
+      params.set('from', selectedDay.value)
+      params.set('to', next.toISOString().slice(0, 10))
+    }
+    const data = await api(`/api/library?${params}`, listController.signal)
     if (sequence !== listSequence) return
     songs.value = append ? [...songs.value, ...data.songs.filter(song => !songs.value.some(existing => existing.id === song.id))] : data.songs
     total.value = data.total
@@ -115,6 +132,58 @@ async function backToList() {
   listHeading.value?.focus()
 }
 
+async function loadTimeline() {
+  const sequence = ++timelineSequence
+  timelineController?.abort()
+  timelineController = new AbortController()
+  timelineLoading.value = true
+  timelineError.value = ''
+  try {
+    const data = await api('/api/library/timeline', timelineController.signal)
+    if (sequence !== timelineSequence) return
+    timeline.value = data
+    const current = new Date().getUTCFullYear()
+    const first = Number(data.first_date?.slice(0, 4)) || current
+    const last = Number(data.last_date?.slice(0, 4)) || current
+    timelineYear.value = timelineInitialized ? Math.max(first, Math.min(last, timelineYear.value)) : last
+    timelineInitialized = true
+    if (selectedDay.value && Number(selectedDay.value.slice(0, 4)) !== timelineYear.value) selectedDay.value = null
+  } catch (error) {
+    if (sequence === timelineSequence && error.name !== 'AbortError') timelineError.value = error.message
+  } finally {
+    if (sequence === timelineSequence) timelineLoading.value = false
+  }
+}
+
+function refreshLibrary() {
+  loadSongs()
+  if (view.value === 'timeline') loadTimeline()
+}
+
+function changeYear(year) {
+  selectedDay.value = null
+  timelineYear.value = year
+}
+
+watch(selectedDay, () => {
+  ++listSequence
+  listController?.abort()
+  clearTimeout(searchTimer)
+  songs.value = []
+  clearSelection()
+  loadSongs()
+}, { flush: 'sync' })
+
+watch(view, value => {
+  selectedDay.value = null
+  if (value === 'timeline') loadTimeline()
+  else {
+    ++timelineSequence
+    timelineController?.abort()
+    timelineLoading.value = false
+  }
+}, { flush: 'sync' })
+
 watch(query, () => {
   ++listSequence
   listController?.abort()
@@ -128,6 +197,7 @@ onBeforeUnmount(() => {
   clearTimeout(searchTimer)
   listController?.abort()
   detailController?.abort()
+  timelineController?.abort()
 })
 
 function date(value) {
@@ -176,14 +246,20 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
 
 <template>
   <v-app>
-    <div class="library-shell" :class="{ 'show-detail': mobileDetail }">
+    <div class="library-shell" :class="{ 'show-detail': mobileDetail, 'timeline-view': view === 'timeline' }">
+      <LibraryTimeline v-if="view === 'timeline'" :timeline="timeline" :year="timelineYear" :selected-day="selectedDay" :loading="timelineLoading" :error="timelineError" @select="selectedDay = $event" @clear="selectedDay = null" @year="changeYear" @retry="loadTimeline" />
       <aside class="song-panel" aria-label="Song library">
         <header class="library-header">
           <div class="heading-line">
             <h1 ref="listHeading" tabindex="-1">Suno Library</h1>
-            <v-btn :disabled="loading" @click="loadSongs()">Refresh</v-btn>
+            <v-btn :disabled="loading || timelineLoading" @click="refreshLibrary">Refresh</v-btn>
           </div>
           <p class="muted inventory" aria-live="polite">{{ inventory === null ? 'Connecting to your collector…' : `${inventory.toLocaleString()} songs captured` }}</p>
+          <div class="view-switch" role="group" aria-label="Library view">
+            <v-btn size="small" :aria-pressed="view === 'songs'" :class="{ 'active-view': view === 'songs' }" @click="view = 'songs'">Songs</v-btn>
+            <v-btn size="small" :aria-pressed="view === 'timeline'" :class="{ 'active-view': view === 'timeline' }" @click="view = 'timeline'">Timeline</v-btn>
+          </div>
+          <p v-if="selectedDay" class="date-filter">Date: {{ selectedDay }} UTC <v-btn size="small" @click="selectedDay = null">Clear</v-btn></p>
           <v-text-field v-model="query" label="Search song titles" variant="outlined" density="compact" hide-details />
           <p v-if="query" class="search-count muted" aria-live="polite">{{ loading ? 'Searching…' : `${total.toLocaleString()} matching songs` }}</p>
           <v-btn v-if="query" size="small" @click="query = ''">Clear search</v-btn>
@@ -194,7 +270,7 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             <p>{{ listError }}</p>
             <v-btn @click="loadSongs()">Retry library</v-btn>
           </div>
-          <p v-if="!loading && !listError && !songs.length" class="state muted">{{ query ? 'No songs match this title. Try another search.' : 'No songs captured yet. Browse Suno with the collector enabled, then refresh.' }}</p>
+          <p v-if="!loading && !listError && !songs.length" class="state muted">{{ selectedDay ? (query ? 'No songs on this UTC day match your title search.' : 'No songs captured on this UTC day. Select another day or clear the date filter.') : query ? 'No songs match this title. Try another search.' : 'No songs captured yet. Browse Suno with the collector enabled, then refresh.' }}</p>
           <ul class="song-list">
             <li v-for="song in songs" :key="song.id">
               <button class="song-row" :class="{ selected: song.id === selectedId }" :aria-current="song.id === selectedId ? 'true' : undefined" @click="selectSong(song.id)">
