@@ -1,0 +1,10 @@
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+/node_modules/
+/dist/
+repomix-output.xml
+.env
+.env.*
+!.env.example

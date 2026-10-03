@@ -1,0 +1,21 @@
+{
+  "name": "suno-local-collector",
+  "private": true,
+  "type": "module",
+  "description": "Passive Suno song capture into a deduplicated local SQLite database",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "vue": "^3.5.22",
+    "vuetify": "^3.10.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "vite": "^7.1.7"
+  }
+}
