@@ -97,7 +97,12 @@ h4 { font-size: .8rem; font-weight: 500; color: var(--muted); margin-bottom: 10p
 .detail-columns { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(220px, 1fr); gap: 30px; min-width: 0; }
 .detail-columns > * { min-width: 0; }
 .detail-sidebar .detail-section { padding-bottom: 24px; }
-.detail-sidebar h4 { margin: 18px 0 6px; }
+.detail-sidebar .tag-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 18px 0 6px; }
+.detail-sidebar .tag-label h4 { margin: 0; }
+.tag-copy-icon { display: inline-grid; flex: none; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.tag-copy-icon:hover:not(:disabled) { color: var(--accent); }
+.tag-copy-icon:disabled { opacity: .4; cursor: default; }
+.tag-copy-feedback { color: var(--accent); font-size: .75rem; }
 .tag-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; line-height: 1.65; }
 .persona-grid { display: grid; grid-template-columns: minmax(0, 90px) minmax(0, 1fr); gap: 10px 12px; font-size: .85rem; line-height: 1.5; }
 .persona-grid dt { color: var(--muted); }

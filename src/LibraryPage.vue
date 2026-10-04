@@ -28,6 +28,8 @@ const detailError = ref('')
 const mobileDetail = ref(false)
 const detailHeading = ref(null)
 const copyFeedback = ref('')
+const tagCopyFeedback = ref('')
+let tagCopySequence = 0
 let copySequence = 0
 async function copySongId() {
   const id = selectedId.value
@@ -40,7 +42,19 @@ async function copySongId() {
     if (sequence === copySequence && selectedId.value === id) copyFeedback.value = 'Could not copy song UUID. Select the UUID text to copy it.'
   }
 }
-watch(selectedId, () => { ++copySequence; copyFeedback.value = '' })
+async function copyTags(kind) {
+  const value = kind === 'positive' ? positiveTags.value : negativeTags.value
+  if (typeof value !== 'string' || !value.length) return
+  const id = selectedId.value
+  const sequence = ++tagCopySequence
+  try {
+    await navigator.clipboard.writeText(value)
+    if (sequence === tagCopySequence && selectedId.value === id) tagCopyFeedback.value = `${kind === 'positive' ? 'Positive' : 'Negative'} tags copied.`
+  } catch {
+    if (sequence === tagCopySequence && selectedId.value === id) tagCopyFeedback.value = `Could not copy ${kind} tags.`
+  }
+}
+watch(selectedId, () => { ++copySequence; copyFeedback.value = ''; ++tagCopySequence; tagCopyFeedback.value = '' })
 const listHeading = ref(null)
 const view = ref('songs')
 const selectedDay = ref(null)
@@ -355,10 +369,21 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
               <aside class="detail-sidebar" aria-label="Song tags and persona">
                 <section class="detail-section">
                   <h3>Tags</h3>
-                  <h4>Positive tags</h4>
+                  <div class="tag-label">
+                    <h4>Positive tags</h4>
+                    <button type="button" class="tag-copy-icon" aria-label="Copy positive tags" title="Copy positive tags" :disabled="typeof positiveTags !== 'string' || !positiveTags.length" @click="copyTags('positive')">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+                    </button>
+                  </div>
                   <p class="tag-text" :class="{ muted: !known(positiveTags) }">{{ known(positiveTags) ? positiveTags : 'No positive tags captured.' }}</p>
-                  <h4>Negative tags</h4>
+                  <div class="tag-label">
+                    <h4>Negative tags</h4>
+                    <button type="button" class="tag-copy-icon" aria-label="Copy negative tags" title="Copy negative tags" :disabled="typeof negativeTags !== 'string' || !negativeTags.length" @click="copyTags('negative')">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+                    </button>
+                  </div>
                   <p class="tag-text" :class="{ muted: !known(negativeTags) }">{{ known(negativeTags) ? negativeTags : 'No negative tags captured.' }}</p>
+                  <span class="tag-copy-feedback" :class="{ error: tagCopyFeedback.startsWith('Could not') }" role="status" aria-live="polite">{{ tagCopyFeedback }}</span>
                 </section>
                 <section class="detail-section">
                   <h3>Persona</h3>

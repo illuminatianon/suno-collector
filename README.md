@@ -57,7 +57,7 @@ V2 promotes `major_model_version`, `duration`, `is_public`, `play_count`, `upvot
 
 ## Library and timeline
 
-The **Songs** view provides title search and a newest-first list. Selecting a song opens a detail panel with title, UUID copy button, creation date, and badges for known Remix/Public/Private/Explicit attributes. Lyrics are the main column; positive/negative tags and persona details sit alongside them (stacked below on mobile). Persona info uses merged SQLite metadata when available and otherwise the captured clip object. Expand **More metadata** or **Full captured JSON** to inspect the remaining fields.
+The **Songs** view provides title search and a newest-first list. Selecting a song opens a detail panel with title, UUID copy button, creation date, and badges for known Remix/Public/Private/Explicit attributes. Lyrics are the main column; positive/negative tags and persona details sit alongside them (stacked below on mobile). Small copy icons beside each tag label copy the captured text exactly, including line breaks; icons are disabled when no tags were captured. Persona info uses merged SQLite metadata when available and otherwise the captured clip object. Expand **More metadata** or **Full captured JSON** to inspect the remaining fields.
 
 The **Timeline** view shows daily creation counts as a calendar heatmap. Select a day to filter the same song list, use previous/next to change years, or clear the date filter to return to the full list.
 
