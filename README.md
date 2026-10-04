@@ -1,10 +1,10 @@
 # Suno Collector
 
-A local archive and browser for your Suno songs. A Violentmonkey script captures song data while you browse Suno normally, a Node server stores it in SQLite, and a Vue 3/Vuetify dark interface lets you explore it.
+A local archive and browser for your Suno songs. A compatible userscript extension runs the passive collector while you browse Suno normally, a Node server stores the captured data in SQLite, and a Vue 3/Vuetify dark interface lets you explore it.
 
 ## Setup
 
-Requires **Node.js 24+**, **npm**, and **Violentmonkey** in your browser.
+Requires **Node.js 24+**, **npm**, and a browser userscript extension that supports the script's `GM_*` APIs and `unsafeWindow` (for example, **Violentmonkey**).
 
 ```sh
 npm ci
@@ -16,7 +16,7 @@ Open **http://127.0.0.1:4318/** for the library.
 
 To enable capture:
 
-1. With the server running, open **http://127.0.0.1:4318/userscript.user.js** and install it in Violentmonkey.
+1. With the server running, open **http://127.0.0.1:4318/userscript.user.js** and install it using your userscript extension (Violentmonkey is one option).
 2. Log into Suno in that browser, then reload Suno once.
 3. Browse and scroll through your Library normally.
 4. Click **Refresh** in the local library to see newly captured songs.
@@ -27,7 +27,7 @@ Install the script from the running server, not the checked-in template. The gen
 
 The script passively observes Suno's `/api/feed/v3` Fetch/XHR responses, including single-song lookups. It copies the returned clip objects without consuming the application's response. It does **not** scroll automatically, replay requests, or download audio.
 
-Captured batches are queued in Violentmonkey storage and sent to the localhost ingress endpoint. Failed deliveries retry every 15 seconds; acknowledged batches are removed. The script menu provides status, pause/resume delivery, and manual retry. Browser console messages start with `[Suno collector]`.
+Captured batches are queued in the userscript extension's storage and sent to the localhost ingress endpoint. Failed deliveries retry every 15 seconds; acknowledged batches are removed. The userscript menu provides status, pause/resume delivery, and manual retry. Browser console messages start with `[Suno collector]`.
 
 SQLite stores one record per song ID in `data/songs.sqlite`:
 
@@ -35,6 +35,8 @@ SQLite stores one record per song ID in `data/songs.sqlite`:
 - Changed data updates the existing record.
 - Different IDs remain separate, even if titles or lyrics match.
 - `raw_json` preserves the complete clip, including lyrics, styles, generation settings, URLs, and unknown fields.
+
+The server records `first_captured_at` and `updated_at` as UTC ISO timestamps (`new Date().toISOString()`). It preserves each clip's `created_at` **exactly as received**, both in its indexed column and in `raw_json`: Suno commonly supplies UTC `Z` timestamps, but an offset-bearing value is not rewritten. `TIME_ZONE` changes only date grouping, filtering, and display; it never changes stored timestamps.
 
 Capture is limited to responses the Suno UI actually loads. Hidden categories and filters can affect coverage; the archive is not automatically guaranteed to contain every song. Separate attribution responses are not currently captured.
 
