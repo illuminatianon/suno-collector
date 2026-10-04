@@ -1,37 +1,42 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { resolve, dirname, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from 'node:process';
 
-// Usage: npm start; install http://127.0.0.1:4318/userscript.user.js in Violentmonkey.
-// Optional .env configures TIME_ZONE, SUNO_DB and PORT; existing shell values take precedence.
+// Usage: npm start; install http://127.0.0.1:4318/userscript.user.js in a compatible userscript extension.
+// Optional .env configures the initial TIME_ZONE, SUNO_DB and PORT; existing shell values take precedence.
 if (process.argv.includes('--help')) {
   console.log(`Start: npm start (Node 24+)
-Install in Violentmonkey: http://127.0.0.1:4318/userscript.user.js
+Install generated /userscript.user.js in a compatible userscript extension (e.g. Violentmonkey); update old v1.0.0 installs to v1.1.0.
 Library UI: run npm install and npm run build, then open http://127.0.0.1:4318/.
 UI development: keep npm start running, then npm run dev for Vite with the same local API.
 Use Refresh to pick up newly captured songs; search matches titles and Load more fetches 100 summaries.
 Select a song for full lyrics and metadata; Full captured JSON exposes every field without loading remote media.
-The UI uses an independent process-local read-only token from GET /api/session.
+The UI uses an independent process-local session token from GET /api/session; it can edit settings but cannot ingest songs.
 SQL UI: open /sql to run one read-only SQLite statement and download all result rows as CSV.
 POST /api/query accepts {sql:"SELECT ..."} with the library read token or persistent ingress token.
 Results are {columns:[...],rows:[[...]]}, preserving strings, numbers, and nulls without pagination or a hidden limit.
 SELECT and CTE queries support json_extract and local_date(timestamp); archive writes are rejected.
 GET /api/library?limit=100&offset=0&q=title lists songs; GET /api/library/<id> returns all clip data.
 GET /api/config returns {time_zone} with the library read token or persistent ingress token.
+GET/PUT /api/settings reads or saves Suno User ID, ingest mode and time zone with either bearer token.
+Open /settings to set a Suno User ID and capture mode before first ingest.
+Default Owned blocks delivery with HTTP 409 until an ID is saved; the extension retains the batch.
+Remixed also keeps known outside source clips referenced by your owned remixes; All keeps every delivered clip.
+The ingest policy applies to future deliveries only; skipped clips must be recaptured if needed later.
 GET /api/library/timeline returns configured local day counts, first_date, last_date, and total (including undated songs).
-Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in TIME_ZONE; either is optional.
+Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in the saved time zone; either is optional.
 Date boundaries must be real calendar dates with from < to; dated queries omit unparseable/undated songs.
 Then reload Suno once and browse Library manually. The adapter does not scroll or request songs.
 Console prefix: [Suno collector]. Violentmonkey menu: status, pause/resume delivery, retry.
 Offline captures persist in extension storage; retries contact only localhost every 15 seconds.
-Configuration: optional .env in the working directory; shell values take precedence.
-TIME_ZONE=America/Detroit SUNO_DB=./data/songs.sqlite PORT=4318
-TIME_ZONE must be a valid IANA timezone; restart the server and reload the browser after changing it.
+Configuration: optional .env in the working directory; shell values take precedence for bootstrap.
+TIME_ZONE=America/Detroit (first-run seed only) SUNO_DB=./data/songs.sqlite PORT=4318
+After first run, the saved time zone in SQLite wins; change it in Settings without restarting.
 Storage: songs.id is the primary key; raw_json preserves every clip field, including metadata.prompt lyrics.
 Identical JSON is a no-op; changed JSON replaces the same row. Different song IDs remain distinct.
 GET /health returns a count. Authenticated GET /api/songs?limit=100&after=<id> exports full clips.
@@ -47,17 +52,20 @@ try {
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
 }
-const timeZone = process.env.TIME_ZONE ?? 'America/Detroit';
-let dayFormatter;
-try {
-  // Reject offset identifiers too: the runtime setting is an IANA timezone, not a fixed offset.
-  if (!timeZone || /^[+-]/.test(timeZone)) throw new RangeError('Not an IANA timezone');
-  dayFormatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+function formatterFor(zone) {
+  if (typeof zone !== 'string' || !zone || /^[+-]/.test(zone)) throw new RangeError('Not an IANA timezone');
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
   });
-} catch {
-  throw new Error(`Invalid TIME_ZONE ${JSON.stringify(timeZone)}: expected a valid IANA timezone (for example America/Detroit or UTC)`);
 }
+function initialTimeZone() {
+  const zone = process.env.TIME_ZONE ?? 'America/Detroit';
+  try { formatterFor(zone); }
+  catch { throw new Error(`Invalid TIME_ZONE ${JSON.stringify(zone)}: expected a valid IANA timezone (for example America/Detroit or UTC)`); }
+  return zone;
+}
+// Keep invalid first-run configuration from creating a new archive.
+const firstRunZone = existsSync(resolve(process.env.SUNO_DB || 'data/songs.sqlite')) ? null : initialTimeZone();
 const port = Number(process.env.PORT || 4318);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
 const dbPath = resolve(process.env.SUNO_DB || 'data/songs.sqlite');
@@ -81,6 +89,45 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS songs_created_at ON songs(created_at);
   CREATE INDEX IF NOT EXISTS songs_user_id ON songs(user_id);
 `);
+const setting = db.prepare('SELECT value FROM settings WHERE key=?');
+const storeSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+const storedZone = setting.get('time_zone')?.value;
+const initialZone = storedZone ?? firstRunZone ?? initialTimeZone();
+let dayFormatter = formatterFor(initialZone);
+db.prepare('INSERT OR IGNORE INTO settings VALUES (?, ?)').run('time_zone', initialZone);
+let settings = {
+  user_id: setting.get('user_id')?.value || null,
+  ingest_mode: setting.get('ingest_mode')?.value ?? 'owned',
+  time_zone: setting.get('time_zone').value,
+};
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function normalizedId(value) { return typeof value === 'string' && uuid.test(value.trim()) ? value.trim().toLowerCase() : null; }
+function validateSettings(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body) ||
+      Object.keys(body).sort().join(',') !== 'ingest_mode,time_zone,user_id') throw new Error('Supply exactly user_id, ingest_mode and time_zone');
+  const blankId = body.user_id === null || typeof body.user_id === 'string' && !body.user_id.trim();
+  const userId = blankId ? null : normalizedId(body.user_id);
+  if (userId === null && !blankId) throw new Error('user_id must be a UUID or null');
+  if (!['owned', 'remixed', 'all'].includes(body.ingest_mode)) throw new Error('ingest_mode must be owned, remixed or all');
+  if (body.ingest_mode !== 'all' && !userId) throw new Error('Enter a Suno User ID before choosing Owned or Remixed');
+  if (typeof body.time_zone !== 'string' || body.time_zone !== body.time_zone.trim()) throw new Error('time_zone must be a valid IANA timezone');
+  try { formatterFor(body.time_zone); }
+  catch { throw new Error('time_zone must be a valid IANA timezone'); }
+  return { user_id: userId, ingest_mode: body.ingest_mode, time_zone: body.time_zone };
+}
+function saveSettings(next) {
+  const formatter = formatterFor(next.time_zone);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    storeSetting.run('user_id', next.user_id ?? '');
+    storeSetting.run('ingest_mode', next.ingest_mode);
+    storeSetting.run('time_zone', next.time_zone);
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  if (settings.user_id !== next.user_id || settings.ingest_mode !== next.ingest_mode) remixSources = null;
+  settings = next;
+  dayFormatter = formatter;
+}
 db.prepare('INSERT OR IGNORE INTO settings VALUES (?, ?)').run('ingress_token', randomBytes(32).toString('hex'));
 const token = db.prepare('SELECT value FROM settings WHERE key=?').get('ingress_token').value;
 const readToken = randomBytes(32).toString('hex');
@@ -99,7 +146,7 @@ function localDate(timestamp) {
   return `${year.padStart(4, '0')}-${month}-${day}`;
 }
 for (const connection of [db, queryDb]) {
-  connection.function('local_date', { deterministic: true }, localDate);
+  connection.function('local_date', localDate);
 }
 // Reject impossible stored dates; normalize to UTC before the configured local conversion.
 const songDate = `CASE
@@ -126,8 +173,40 @@ const libraryRows = db.prepare(`
 const librarySong = db.prepare('SELECT raw_json, first_captured_at, updated_at FROM songs WHERE id=?');
 const base = `http://127.0.0.1:${port}`;
 const getSong = db.prepare('SELECT raw_json FROM songs WHERE id=?');
+const ownedRemixes = db.prepare('SELECT id, raw_json FROM songs WHERE lower(trim(user_id))=?');
 const insert = db.prepare('INSERT INTO songs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const update = db.prepare('UPDATE songs SET title=?, user_id=?, created_at=?, model_name=?, status=?, raw_json=?, updated_at=? WHERE id=?');
+let remixSources = null;
+function remixReferences(clip) {
+  const refs = new Set();
+  if (clip.metadata?.is_remix === true) {
+    for (const key of ['cover_clip_id', 'edited_clip_id']) {
+      if (typeof clip.metadata[key] === 'string' && clip.metadata[key]) refs.add(clip.metadata[key]);
+    }
+  }
+  return refs;
+}
+function sourceReferences() {
+  if (remixSources) return remixSources;
+  const owned = new Map();
+  const counts = new Map();
+  for (const row of ownedRemixes.iterate(settings.user_id)) {
+    const refs = remixReferences(JSON.parse(row.raw_json));
+    if (refs.size) owned.set(row.id, refs);
+    for (const id of refs) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return remixSources = { owned, counts };
+}
+function replaceReferences(cache, id, refs) {
+  for (const source of cache.owned.get(id) ?? []) {
+    const count = cache.counts.get(source);
+    if (count === 1) cache.counts.delete(source);
+    else cache.counts.set(source, count - 1);
+  }
+  if (refs.size) cache.owned.set(id, refs);
+  else cache.owned.delete(id);
+  for (const source of refs) cache.counts.set(source, (cache.counts.get(source) ?? 0) + 1);
+}
 // Stable object ordering makes bytewise comparison independent of JSON key order.
 function canonical(value) {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -142,20 +221,42 @@ function ingest(clips) {
     if (!clip || typeof clip !== 'object' || Array.isArray(clip) || typeof clip.id !== 'string' || !clip.id.trim() || clip.id.length > 200) throw new Error('Each clip requires a nonempty string id');
     unique.set(clip.id, clip);
   }
-  const counts = { inserted: 0, updated: 0, unchanged: 0, received: clips.length, unique: unique.size };
+  const counts = { inserted: 0, updated: 0, unchanged: 0, skipped: 0, received: clips.length, unique: unique.size };
   const now = new Date().toISOString();
+  const owner = settings.user_id;
+  const mode = settings.ingest_mode;
+  const cache = mode === 'remixed' ? sourceReferences() : null;
+  // Resolve references against the final state of this batch, including updates that remove a source.
+  const batchRefs = cache ? new Map(cache.counts) : null;
+  if (cache) {
+    for (const clip of unique.values()) {
+      if (normalizedId(clip.user_id) !== owner) continue;
+      for (const id of cache.owned.get(clip.id) ?? []) {
+        const count = batchRefs.get(id);
+        if (count === 1) batchRefs.delete(id);
+        else batchRefs.set(id, count - 1);
+      }
+      for (const id of remixReferences(clip)) batchRefs.set(id, (batchRefs.get(id) ?? 0) + 1);
+    }
+  }
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const clip of unique.values()) {
+      const isOwned = normalizedId(clip.user_id) === owner;
+      if (mode !== 'all' && !isOwned && (mode === 'owned' || !batchRefs.has(clip.id))) {
+        counts.skipped++;
+        continue;
+      }
       const raw = canonical(clip);
       const existing = getSong.get(clip.id);
       const fields = [text(clip.title), text(clip.user_id), text(clip.created_at), text(clip.model_name), text(clip.status)];
       if (!existing) { insert.run(clip.id, ...fields, raw, now, now); counts.inserted++; }
       else if (existing.raw_json === raw) counts.unchanged++;
       else { update.run(...fields, raw, now, clip.id); counts.updated++; }
+      if (cache && isOwned && (!existing || existing.raw_json !== raw)) replaceReferences(cache, clip.id, remixReferences(clip));
     }
     db.exec('COMMIT');
-  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  } catch (error) { db.exec('ROLLBACK'); remixSources = null; throw error; }
   return counts;
 }
 function authorized(req, expectedToken = token) {
@@ -189,7 +290,7 @@ const assetTypes = {
   '.ttf': 'font/ttf',
 };
 async function serveUi(res, pathname) {
-  const isIndex = pathname === '/' || pathname === '/sql';
+  const isIndex = pathname === '/' || pathname === '/sql' || pathname === '/settings';
   let relative;
   try { relative = isIndex ? 'index.html' : decodeURIComponent(pathname.slice(1)); }
   catch { return send(res, 400, { error: 'Invalid asset path' }); }
@@ -235,9 +336,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/config') {
       if (!authorized(req, readToken) && !authorized(req)) return send(res, 401, { error: 'Bearer token required' });
-      return send(res, 200, { time_zone: timeZone });
+      return send(res, 200, { time_zone: settings.time_zone });
     }
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/sql' || url.pathname.startsWith('/assets/'))) {
+    if (req.method === 'GET' && url.pathname === '/api/settings') {
+      if (!authorized(req, readToken) && !authorized(req)) return send(res, 401, { error: 'Bearer token required' });
+      return send(res, 200, settings);
+    }
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/sql' || url.pathname === '/settings' || url.pathname.startsWith('/assets/'))) {
       return await serveUi(res, url.pathname);
     }
     if (req.method === 'GET' && (url.pathname === '/api/library' || url.pathname.startsWith('/api/library/'))) {
@@ -280,7 +385,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { clip: JSON.parse(row.raw_json), first_captured_at: row.first_captured_at, updated_at: row.updated_at });
     }
     const isQuery = req.method === 'POST' && url.pathname === '/api/query';
-    if (isQuery) {
+    const isSettings = req.method === 'PUT' && url.pathname === '/api/settings';
+    if (isQuery || isSettings) {
       if (!authorized(req, readToken) && !authorized(req)) return send(res, 401, { error: 'Bearer token required' });
     } else if (!authorized(req)) return send(res, 401, { error: 'Bearer token required' });
     if (req.method === 'GET' && url.pathname === '/api/songs') {
@@ -289,8 +395,11 @@ const server = http.createServer(async (req, res) => {
       const rows = db.prepare('SELECT id, raw_json FROM songs WHERE id > ? ORDER BY id LIMIT ?').all(url.searchParams.get('after') || '', limit);
       return send(res, 200, { clips: rows.map(row => JSON.parse(row.raw_json)), next_after: rows.length === limit ? rows.at(-1).id : null });
     }
-    if (!isQuery && (req.method !== 'POST' || url.pathname !== '/api/ingest')) return send(res, 404, { error: 'Not found' });
-    if (!(req.headers['content-type'] || '').startsWith('application/json')) return send(res, isQuery ? 400 : 415, { error: 'application/json required' });
+    if (!isQuery && !isSettings && (req.method !== 'POST' || url.pathname !== '/api/ingest')) return send(res, 404, { error: 'Not found' });
+    if (!isQuery && !isSettings && settings.ingest_mode !== 'all' && !settings.user_id) {
+      return send(res, 409, { error: 'Set a Suno User ID in Settings, or choose All, before delivering captured songs. Pending batches can be retried.' });
+    }
+    if (!(req.headers['content-type'] || '').startsWith('application/json')) return send(res, isQuery || isSettings ? 400 : 415, { error: 'application/json required' });
     const chunks = []; let bytes = 0;
     for await (const chunk of req) {
       bytes += chunk.length;
@@ -300,6 +409,13 @@ const server = http.createServer(async (req, res) => {
     let body;
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { return send(res, 400, { error: 'Invalid JSON' }); }
+    if (isSettings) {
+      let next;
+      try { next = validateSettings(body); }
+      catch (error) { return send(res, 400, { error: error.message }); }
+      saveSettings(next);
+      return send(res, 200, settings);
+    }
     if (isQuery) {
       if (typeof body?.sql !== 'string' || !body.sql.trim() || body.sql.includes('\0')) {
         return send(res, 400, { error: 'sql must be a nonempty SQL string without null characters' });

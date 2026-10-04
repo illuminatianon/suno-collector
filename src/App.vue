@@ -1,9 +1,11 @@
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import { api } from './api.js'
+import { useRoute } from 'vue-router'
 
 const timeZone = ref(null)
+const route = useRoute()
 const configLoading = ref(true)
 const configError = ref('')
 let configController = null
@@ -32,6 +34,13 @@ async function loadConfig() {
 
 onMounted(loadConfig)
 onBeforeUnmount(() => configController?.abort())
+watch(() => route.path, (path, previous) => {
+  if (path === '/' && previous === '/settings') loadConfig()
+})
+
+function settingsSaved(settings) {
+  timeZone.value = settings.time_zone
+}
 </script>
 
 <template>
@@ -40,6 +49,7 @@ onBeforeUnmount(() => configController?.abort())
       <nav class="app-nav" aria-label="Main navigation">
         <RouterLink to="/">Library</RouterLink>
         <RouterLink to="/sql">SQL query</RouterLink>
+        <RouterLink to="/settings">Settings</RouterLink>
       </nav>
       <div class="route-surface">
         <div v-if="configLoading" class="config-state" role="status" aria-busy="true">
@@ -54,7 +64,8 @@ onBeforeUnmount(() => configController?.abort())
           <v-btn @click="loadConfig">Retry configuration</v-btn>
         </div>
         <RouterView v-else v-slot="{ Component, route }">
-          <component :is="Component" v-bind="route.path === '/' ? { timeZone } : {}" />
+          <component :is="Component" :key="route.path === '/' ? `library:${timeZone}` : route.path"
+            v-bind="route.path === '/' ? { timeZone } : {}" @saved="settingsSaved" />
         </RouterView>
       </div>
     </div>

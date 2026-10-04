@@ -33,16 +33,26 @@ import { fileURLToPath } from 'node:url';
   const token = readDb.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value;
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const post = clips => fetch(base + '/api/ingest', { method: 'POST', headers, body: JSON.stringify({ clips }) });
+  const uiSession = await (await fetch(base + '/api/session')).json();
+  const settingsHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${uiSession.token}` };
+  const saveSettings = settings => fetch(base + '/api/settings', { method: 'PUT', headers: settingsHeaders, body: JSON.stringify(settings) });
+  assert.deepEqual(await (await fetch(base + '/api/settings', { headers: settingsHeaders })).json(),
+    { user_id: null, ingest_mode: 'owned', time_zone: 'America/Detroit' });
+  const paused = await post([{ id: 'queued' }]);
+  assert.equal(paused.status, 409);
+  assert.match((await paused.json()).error, /Suno User ID.*Settings/);
+  assert.equal(readDb.prepare('SELECT count(*) AS n FROM songs').get().n, 0);
+  assert.equal((await saveSettings({ user_id: null, ingest_mode: 'all', time_zone: 'America/Detroit' })).status, 200);
   const clip = { id: 'song-1', title: 'Full song', metadata: { prompt: '[intro]\nLyrics with unicode: café 🎵\n[outro]', tags: 'synthwave', control_sliders: { style_weight: 0.66 }, nested: [1, null, { extra: true }] }, audio_url: 'https://example.invalid/audio', unknown_future_field: { keep: 'everything' } };
   await t.test('complete nested data round-trips', async () => {
-    assert.deepEqual(await (await post([clip])).json(), { inserted: 1, updated: 0, unchanged: 0, received: 1, unique: 1 });
+    assert.deepEqual(await (await post([clip])).json(), { inserted: 1, updated: 0, unchanged: 0, skipped: 0, received: 1, unique: 1 });
     const response = await fetch(base + '/api/songs', { headers });
     assert.deepEqual((await response.json()).clips, [clip]);
   });
   await t.test('reordered JSON and repeated IDs are no-ops, including concurrent deliveries', async () => {
     const reordered = { unknown_future_field: clip.unknown_future_field, audio_url: clip.audio_url, metadata: { ...clip.metadata, nested: clip.metadata.nested }, title: clip.title, id: clip.id };
     const responses = await Promise.all(Array.from({ length: 8 }, () => post([reordered, clip])));
-    for (const response of responses) assert.deepEqual(await response.json(), { inserted: 0, updated: 0, unchanged: 1, received: 2, unique: 1 });
+    for (const response of responses) assert.deepEqual(await response.json(), { inserted: 0, updated: 0, unchanged: 1, skipped: 0, received: 2, unique: 1 });
     assert.equal(readDb.prepare('SELECT count(*) AS n FROM songs').get().n, 1);
   });
   await t.test('changes replace the same row and retain original capture time', async () => {
@@ -95,6 +105,66 @@ import { fileURLToPath } from 'node:url';
       assert.equal((await get('/api/library?' + query)).status, 400);
     }
   });
+  await t.test('settings reject invalid policies atomically and both authorized tokens can edit', async () => {
+    const owner = 'A1801DAD-940B-4C9D-8F0B-215C74F9AA10';
+    const original = { user_id: null, ingest_mode: 'all', time_zone: 'America/Detroit' };
+    for (const attempted of [
+      { ...original, ingest_mode: 'owned' },
+      { ...original, ingest_mode: 'remixed' },
+      { ...original, user_id: 'bad' },
+      { ...original, ingest_mode: 'random' },
+      { ...original, time_zone: 'Not/A_Timezone' },
+      { ...original, time_zone: '+03:00' },
+      { ...original, ingress_token: 'leak' },
+    ]) {
+      const response = await saveSettings(attempted);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await (await fetch(base + '/api/settings', { headers: settingsHeaders })).json(), original);
+    }
+    assert.equal((await fetch(base + '/api/settings')).status, 401);
+    assert.equal((await saveSettings({ ...original, user_id: owner, ingest_mode: 'owned' })).status, 200);
+    assert.deepEqual(await (await fetch(base + '/api/settings', { headers })).json(),
+      { user_id: owner.toLowerCase(), ingest_mode: 'owned', time_zone: 'America/Detroit' });
+    assert.equal(readDb.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value, token);
+  });
+  await t.test('owned and remixed ingest skip unrelated clips; references resolve independent of arrival order', async () => {
+    const owner = 'a1801dad-940b-4c9d-8f0b-215c74f9aa10';
+    const other = 'c1efeeae-600d-4842-aa52-77e9cf57cc20';
+    const owned = (id, metadata = {}) => ({ id, user_id: owner.toUpperCase(), metadata });
+    const foreign = id => ({ id, user_id: other });
+    assert.deepEqual(await (await post([owned('owned-basic'), foreign('excluded-basic'), owned('owned-basic')])).json(),
+      { inserted: 1, updated: 0, unchanged: 0, skipped: 1, received: 3, unique: 2 });
+    assert.equal(readDb.prepare("SELECT count(*) AS n FROM songs WHERE id='excluded-basic'").get().n, 0);
+    assert.equal((await saveSettings({ user_id: owner, ingest_mode: 'remixed', time_zone: 'America/Detroit' })).status, 200);
+    const batch = [
+      foreign('before-reference'),
+      owned('no-remix', { is_remix: false, cover_clip_id: 'not-remixed' }),
+      foreign('not-remixed'),
+      owned('reference', { is_remix: true, cover_clip_id: 'before-reference', edited_clip_id: 'later-reference' }),
+      foreign('later-reference'),
+    ];
+    assert.deepEqual(await (await post(batch)).json(),
+      { inserted: 4, updated: 0, unchanged: 0, skipped: 1, received: 5, unique: 5 });
+    assert.deepEqual(await (await post([foreign('before-reference'), foreign('later-reference'), foreign('not-remixed')])).json(),
+      { inserted: 0, updated: 0, unchanged: 2, skipped: 1, received: 3, unique: 3 });
+    assert.deepEqual(await (await post([foreign('unknown-source')])).json(),
+      { inserted: 0, updated: 0, unchanged: 0, skipped: 1, received: 1, unique: 1 });
+    assert.equal((await (await post([owned('stored-reference', { is_remix: true, edited_clip_id: 'unknown-source' })])).json()).inserted, 1);
+    assert.equal((await (await post([foreign('unknown-source')])).json()).inserted, 1);
+    assert.equal((await (await post([owned('stored-reference', { is_remix: false, edited_clip_id: 'newly-excluded' })])).json()).updated, 1);
+    assert.equal((await (await post([foreign('newly-excluded')])).json()).skipped, 1);
+    assert.equal(readDb.prepare("SELECT count(*) AS n FROM songs WHERE id='unknown-source'").get().n, 1);
+    assert.equal((await (await post([owned('cache-owner', { is_remix: true, cover_clip_id: 'owner-only-source' })])).json()).inserted, 1);
+    assert.equal((await saveSettings({ user_id: other, ingest_mode: 'remixed', time_zone: 'America/Detroit' })).status, 200);
+    assert.equal((await (await post([{ id: 'owner-only-source', user_id: 'ea610d28-01e7-452b-bfb8-39885b2ae8db' }])).json()).skipped, 1);
+    assert.equal((await saveSettings({ user_id: owner, ingest_mode: 'remixed', time_zone: 'America/Detroit' })).status, 200);
+    assert.equal((await (await post([{ id: 'owner-only-source', user_id: 'ea610d28-01e7-452b-bfb8-39885b2ae8db' }])).json()).inserted, 1);
+    assert.equal((await saveSettings({ user_id: owner, ingest_mode: 'owned', time_zone: 'America/Detroit' })).status, 200);
+    assert.equal((await (await post([foreign('before-reference')])).json()).skipped, 1);
+    assert.equal(readDb.prepare("SELECT count(*) AS n FROM songs WHERE id='before-reference'").get().n, 1);
+    assert.equal((await saveSettings({ user_id: null, ingest_mode: 'all', time_zone: 'America/Detroit' })).status, 200);
+    assert.equal((await (await post([foreign('not-remixed')])).json()).inserted, 1);
+  });
   readDb.close();
 });
 
@@ -126,6 +196,9 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
   const session = await (await fetch(base + '/api/session')).json();
   const readHeaders = { Authorization: `Bearer ${session.token}` };
   const get = path => fetch(base + path, { headers: readHeaders });
+  const saveAll = await fetch(base + '/api/settings', { method: 'PUT', headers: { ...readHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: null, ingest_mode: 'all', time_zone: 'America/Detroit' }) });
+  assert.equal(saveAll.status, 200);
   const library = async query => {
     const response = await get('/api/library?' + query);
     assert.equal(response.status, 200);
@@ -293,10 +366,13 @@ test('authenticated SQL queries return full read-only results and SQL deep links
   const ingressHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const session = await (await fetch(base + '/api/session')).json();
   const readHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` };
+  const saveAll = await fetch(base + '/api/settings', { method: 'PUT', headers: readHeaders,
+    body: JSON.stringify({ user_id: null, ingest_mode: 'all', time_zone: 'America/Detroit' }) });
+  assert.equal(saveAll.status, 200);
   const query = (sql, headers = readHeaders) => fetch(base + '/api/query', { method: 'POST', headers, body: JSON.stringify({ sql }) });
 
   await t.test('exact application routes share the index without masking missing API or asset routes', async () => {
-    for (const path of ['/', '/sql']) {
+    for (const path of ['/', '/sql', '/settings']) {
       const response = await fetch(base + path);
       assert.equal(response.status, 200);
       assert.match(response.headers.get('content-type'), /^text\/html/);
@@ -451,6 +527,9 @@ test('runtime timezone configuration controls API dates and fails before databas
     const readHeaders = { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' };
     const ingressHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
     const get = path => fetch(base + path, { headers: readHeaders });
+    const saved = await fetch(base + '/api/settings', { method: 'PUT', headers: readHeaders,
+      body: JSON.stringify({ user_id: null, ingest_mode: 'all', time_zone: (await (await get('/api/config')).json()).time_zone }) });
+    assert.equal(saved.status, 200);
     return { base, get, readHeaders, ingressHeaders };
   }
 
@@ -491,6 +570,20 @@ test('runtime timezone configuration controls API dates and fails before databas
       assert.deepEqual(await sql.json(), { columns: ['day', 'n'], rows: days.map(day => [day.date, day.count]) });
       const detail = await (await get('/api/library/before-midnight')).json();
       assert.equal(detail.clip.created_at, clips[0].created_at);
+      const nextZone = zone === 'UTC' ? 'America/Los_Angeles' : 'UTC';
+      const updated = await fetch(base + '/api/settings', { method: 'PUT', headers: readHeaders,
+        body: JSON.stringify({ user_id: null, ingest_mode: 'all', time_zone: nextZone }) });
+      assert.equal(updated.status, 200);
+      assert.deepEqual(await updated.json(), { user_id: null, ingest_mode: 'all', time_zone: nextZone });
+      assert.deepEqual(await (await get('/api/config')).json(), { time_zone: nextZone });
+      const nextDays = nextZone === 'UTC'
+        ? [{ date: '2024-03-10', count: 2 }, { date: '2024-03-11', count: 1 }]
+        : [{ date: '2024-03-09', count: 1 }, { date: '2024-03-10', count: 1 }, { date: '2024-03-11', count: 1 }];
+      assert.deepEqual((await (await get('/api/library/timeline')).json()).days, nextDays);
+      const nextSql = await fetch(base + '/api/query', { method: 'POST', headers: readHeaders,
+        body: JSON.stringify({ sql: 'SELECT local_date(created_at) AS day, count(*) AS n FROM songs WHERE created_at IS NOT NULL GROUP BY day ORDER BY day' }) });
+      assert.deepEqual(await nextSql.json(), { columns: ['day', 'n'], rows: nextDays.map(day => [day.date, day.count]) });
+      assert.equal((await (await get('/api/library?from=2024-03-10&to=2024-03-11')).json()).total, nextZone === 'UTC' ? 2 : 1);
     });
   }
 
@@ -521,4 +614,66 @@ test('runtime timezone configuration controls API dates and fails before databas
     const { stderr } = await launch(t, { envDirectory: true, invalid: true });
     assert.match(stderr, /EISDIR|directory|Contents of '.env' should be a valid string/i);
   });
+});
+
+test('saved settings survive restarts and override changed or invalid initial environment', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'suno-settings-test-'));
+  const dbPath = join(directory, 'archive.sqlite');
+  const serverPath = fileURLToPath(new URL('./server.js', import.meta.url));
+  const probe = net.createServer();
+  probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  const base = `http://127.0.0.1:${port}`;
+  let child;
+  t.after(async () => {
+    if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    rmSync(directory, { recursive: true, force: true });
+  });
+  async function start(zone) {
+    child = spawn(process.execPath, [serverPath], {
+      cwd: directory, env: { ...process.env, TIME_ZONE: zone, SUNO_DB: dbPath, PORT: String(port) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Server startup timeout: ' + stderr)), 10000);
+      child.stdout.on('data', chunk => {
+        if (String(chunk).includes('Install in Violentmonkey:')) { clearTimeout(timer); resolve(); }
+      });
+      child.once('exit', code => { clearTimeout(timer); reject(new Error(`Server exited ${code}: ${stderr}`)); });
+    });
+  }
+  async function stop() {
+    const exited = once(child, 'exit');
+    child.kill();
+    await exited;
+  }
+  const owner = 'a1801dad-940b-4c9d-8f0b-215c74f9aa10';
+  await start('US/Pacific');
+  const archive = new DatabaseSync(dbPath);
+  const token = archive.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value;
+  assert.equal(archive.prepare("SELECT value FROM settings WHERE key='time_zone'").get().value, 'US/Pacific');
+  const session = await (await fetch(base + '/api/session')).json();
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` };
+  const ingestHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const settings = { user_id: owner, ingest_mode: 'remixed', time_zone: 'UTC' };
+  const saved = await fetch(base + '/api/settings', { method: 'PUT', headers, body: JSON.stringify(settings) });
+  assert.deepEqual(await saved.json(), settings);
+  const owned = { id: 'persisted-remix', user_id: owner.toUpperCase(), metadata: { is_remix: true, cover_clip_id: 'later-source' } };
+  const ingested = await fetch(base + '/api/ingest', { method: 'POST', headers: ingestHeaders, body: JSON.stringify({ clips: [owned] }) });
+  assert.equal((await ingested.json()).inserted, 1);
+  await stop();
+  await start('Not/A_Timezone');
+  const sessionAfter = await (await fetch(base + '/api/session')).json();
+  const reloaded = await (await fetch(base + '/api/settings', { headers: { Authorization: `Bearer ${sessionAfter.token}` } })).json();
+  assert.deepEqual(reloaded, settings);
+  assert.equal((await (await fetch(base + '/api/config', { headers: ingestHeaders })).json()).time_zone, 'UTC');
+  const source = { id: 'later-source', user_id: 'c1efeeae-600d-4842-aa52-77e9cf57cc20' };
+  const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingestHeaders, body: JSON.stringify({ clips: [source] }) });
+  assert.deepEqual(await response.json(), { inserted: 1, updated: 0, unchanged: 0, skipped: 0, received: 1, unique: 1 });
+  assert.equal(archive.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value, token);
+  assert.equal(archive.prepare("SELECT value FROM settings WHERE key='time_zone'").get().value, 'UTC');
+  archive.close();
 });

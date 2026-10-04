@@ -21,6 +21,18 @@ body { overflow: hidden; }
 .config-state { max-width: 640px; max-height: 100%; overflow: auto; padding: 28px; line-height: 1.7; overflow-wrap: anywhere; }
 .config-state p { margin: 12px 0; }
 .config-state .v-progress-linear { margin-top: 20px; }
+.settings-page { height: 100%; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #55585e transparent; }
+.settings-content { max-width: 760px; padding: 34px 32px 64px; }
+.settings-content h1 { font-size: 1.65rem; margin: 0 0 10px; }
+.settings-intro { line-height: 1.65; margin: 0 0 32px; }
+.settings-section { padding: 24px 0; border-top: 1px solid var(--divider); }
+.settings-section h2 { font-size: 1.1rem; margin: 0 0 18px; }
+.settings-section p { font-size: .875rem; line-height: 1.65; margin: 4px 0 12px; }
+.settings-section code { font: .8rem/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; color: #d0ddfa; }
+.settings-warning { color: #f3c89a; }
+.settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding-top: 12px; }
+.settings-success { color: #b9e4c1; font-size: .875rem; }
+.settings-message { margin: 18px 0; overflow-wrap: anywhere; }
 .library-shell { height: 100%; display: grid; grid-template-columns: clamp(290px, 32vw, 430px) minmax(0, 1fr); }
  .sql-page { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
 .sql-editor { padding: 24px 28px 20px; border-bottom: 1px solid var(--divider); flex-shrink: 0; background: #202123; }
@@ -128,6 +140,8 @@ input { caret-color: var(--accent); }
 .calendar-legend { display: flex; align-items: center; gap: 5px; font-size: .7rem; }
 .calendar-swatch { display: inline-block; width: 12px; height: 12px; }
 @media (max-width: 700px) {
+  .app-nav { overflow-x: auto; white-space: nowrap; }
+  .settings-content { padding: 26px 20px 48px; }
   .library-shell { grid-template-columns: minmax(0, 1fr); }
   .timeline-view { grid-template-rows: auto minmax(0, 1fr); }
   .timeline-panel { padding: 14px 20px 10px; }

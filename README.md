@@ -16,10 +16,11 @@ Open **http://127.0.0.1:4318/** for the library.
 
 To enable capture:
 
-1. With the server running, open **http://127.0.0.1:4318/userscript.user.js** and install it using your userscript extension (Violentmonkey is one option).
-2. Log into Suno in that browser, then reload Suno once.
-3. Browse and scroll through your Library normally.
-4. Click **Refresh** in the local library to see newly captured songs.
+1. With the server running, open **http://127.0.0.1:4318/settings**. Enter your Suno user UUID and choose a capture mode. The default is **Owned**; until you save an ID, inbound batches receive a setup error and remain queued for retry. If your archive already has songs, the SQL page can help identify your account: `SELECT user_id, count(*) AS songs FROM songs GROUP BY user_id ORDER BY songs DESC`.
+2. Open **http://127.0.0.1:4318/userscript.user.js** and install or update it using your userscript extension (Violentmonkey is one option). Existing installs of version 1.0.0 should be updated to 1.1.0 so filtered acknowledgements are handled correctly.
+3. Log into Suno in that browser, then reload Suno once.
+4. Browse and scroll through your Library normally.
+5. Click **Refresh** in the local library to see newly captured songs.
 
 Install the script from the running server, not the checked-in template. The generated script contains your local ingress token. The browser and receiver must run on the same machine.
 
@@ -29,6 +30,14 @@ The script passively observes Suno's `/api/feed/v3` Fetch/XHR responses, includi
 
 Captured batches are queued in the userscript extension's storage and sent to the localhost ingress endpoint. Failed deliveries retry every 15 seconds; acknowledged batches are removed. The userscript menu provides status, pause/resume delivery, and manual retry. Browser console messages start with `[Suno collector]`.
 
+**Capture modes** affect only future deliveries; changing them never deletes stored songs:
+
+- **Owned** (default): store clips whose `user_id` matches the saved Suno UUID.
+- **Remixed**: store owned clips plus outside source clips explicitly referenced by an owned remix (`metadata.is_remix` with `cover_clip_id` or `edited_clip_id`). A source seen before its remix is known must be captured again; the server does not retroactively fetch songs.
+- **All**: store every delivered clip. You may leave the Suno user ID blank in this mode.
+
+Acknowledgements distinguish inserted, updated, unchanged, and skipped clips. A setup error does **not** acknowledge a batch, so the extension keeps it queued. Skipped clips are not retained for later reevaluation.
+
 SQLite stores one record per song ID in `data/songs.sqlite`:
 
 - Identical captures are no-ops.
@@ -36,7 +45,7 @@ SQLite stores one record per song ID in `data/songs.sqlite`:
 - Different IDs remain separate, even if titles or lyrics match.
 - `raw_json` preserves the complete clip, including lyrics, styles, generation settings, URLs, and unknown fields.
 
-The server records `first_captured_at` and `updated_at` as UTC ISO timestamps (`new Date().toISOString()`). It preserves each clip's `created_at` **exactly as received**, both in its indexed column and in `raw_json`: Suno commonly supplies UTC `Z` timestamps, but an offset-bearing value is not rewritten. `TIME_ZONE` changes only date grouping, filtering, and display; it never changes stored timestamps.
+The server records `first_captured_at` and `updated_at` as UTC ISO timestamps (`new Date().toISOString()`). It preserves each clip's `created_at` **exactly as received**, both in its indexed column and in `raw_json`: Suno commonly supplies UTC `Z` timestamps, but an offset-bearing value is not rewritten. Changing the saved timezone affects only date grouping, filtering, and display; it never changes stored timestamps.
 
 Capture is limited to responses the Suno UI actually loads. Hidden categories and filters can affect coverage; the archive is not automatically guaranteed to contain every song. Separate attribution responses are not currently captured.
 
@@ -46,7 +55,7 @@ The **Songs** view provides title search, a newest-first list, and a detail pane
 
 The **Timeline** view shows daily creation counts as a calendar heatmap. Select a day to filter the same song list, use previous/next to change years, or clear the date filter to return to the full list.
 
-Timeline grouping, date filters, and formatted timestamps use the timezone configured by `TIME_ZONE` (default **America/Detroit**), including daylight saving time. The UI fetches the active timezone from the server; raw timestamps remain unchanged in the database and JSON. Undated or invalid timestamps count toward the archive total but do not appear in daily buckets.
+Timeline grouping, date filters, and formatted timestamps use the timezone saved in **Settings** (including daylight saving time). On first run only, the server copies `TIME_ZONE` from `.env` into the existing SQLite `settings` table; if unset, the initial value is **America/Detroit**. After that, use the Settings page to change the timezone without restarting or rebuilding. The UI fetches the active timezone from the server; raw timestamps remain unchanged in the database and JSON. Undated or invalid timestamps count toward the archive total but do not appear in daily buckets.
 
 ## SQL query tool
 
@@ -77,11 +86,11 @@ npm test                # Isolated API/SQLite and CSV tests
 node server.js --help   # API and installation details
 ```
 
-Copy `.env.example` to `.env` and edit `TIME_ZONE` to an IANA timezone, for example `America/Los_Angeles`. Restart the server and reload the browser after changing it; no rebuild or database migration is needed. The server refuses invalid timezone names rather than mislabeling dates. Shell environment variables override `.env`.
+Use **http://127.0.0.1:4318/settings** to edit Suno User ID, capture mode, and timezone. The timezone control lists names from `Intl.supportedValuesOf('timeZone')` and also supports UTC. Settings persist in the database's existing `settings` table.
 
-Supported settings:
+`.env` is optional for server startup. `TIME_ZONE` is a **first-run bootstrap only**: it seeds the saved timezone if none exists, and later edits to the environment do not override the saved value. Shell environment variables override `.env` when that initial value is read. No database migration or rebuild is needed.
 
-- `TIME_ZONE`: IANA timezone used for the calendar, date filters, displayed timestamps, and `local_date()`; defaults to `America/Detroit`.
+- `TIME_ZONE`: first-run timezone seed; default `America/Detroit`. After initial setup, change the timezone in-app.
 - `PORT`: server port, default `4318`.
 - `SUNO_DB`: SQLite path, default `data/songs.sqlite`.
 

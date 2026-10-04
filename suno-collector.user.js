@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Suno Local Song Collector
 // @namespace    suno-local-collector
-// @version      1.0.0
+// @version      1.1.0
 // @description  Passively save complete Library feed clips to your local SQLite collector. Never requests songs or scrolls.
 // @match        https://suno.com/*
+// @updateURL    __INGRESS_BASE__/userscript.user.js
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_getValue
@@ -67,12 +68,12 @@
           let result;
           try {
             result = JSON.parse(response.responseText);
-            if (result.unique !== batch.length || !['inserted', 'updated', 'unchanged'].every(k => Number.isInteger(result[k])) || result.inserted + result.updated + result.unchanged !== batch.length) throw new Error('Invalid acknowledgement');
+            if (result.unique !== batch.length || !['inserted', 'updated', 'unchanged', 'skipped'].every(k => Number.isSafeInteger(result[k]) && result[k] >= 0) || result.inserted + result.updated + result.unchanged + result.skipped !== batch.length) throw new Error('Invalid acknowledgement');
           } catch (error) { return failed(error.message); }
           // Delete only this acknowledged immutable batch; other captures are untouched.
           try { GM_deleteValue(key); } catch (error) { return failed('Could not persist acknowledgement: ' + error.message); }
           busy = false;
-          lastResult = `${result.inserted} inserted, ${result.updated} updated, ${result.unchanged} unchanged`;
+          lastResult = `${result.inserted} inserted, ${result.updated} updated, ${result.unchanged} unchanged, ${result.skipped} skipped`;
           console.info(PREFIX, lastResult);
           if (queueKeys().length) setTimeout(flush, 250);
         },

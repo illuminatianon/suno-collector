@@ -1,6 +1,6 @@
 import { createApp } from 'vue'
 import { createVuetify } from 'vuetify'
-import { VApp, VBtn, VTextField, VProgressLinear } from 'vuetify/components'
+import { VApp, VBtn, VTextField, VProgressLinear, VAutocomplete, VSelect } from 'vuetify/components'
 import { Ripple } from 'vuetify/directives'
 import 'vuetify/styles'
 import App from './App.vue'
@@ -8,7 +8,7 @@ import router from './router.js'
 import './style.css'
 
 const vuetify = createVuetify({
-  components: { VApp, VBtn, VTextField, VProgressLinear },
+  components: { VApp, VBtn, VTextField, VProgressLinear, VAutocomplete, VSelect },
   directives: { Ripple },
   theme: {
     defaultTheme: 'libraryDark',
