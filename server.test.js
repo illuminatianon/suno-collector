@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import net from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 
  test('real SQLite ingress preserves full data and never creates duplicate songs', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'suno-test-'));
@@ -15,7 +16,7 @@ import { DatabaseSync } from 'node:sqlite';
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const dbPath = join(directory, 'songs.sqlite');
-  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, TIME_ZONE: 'America/Detroit', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });
   t.after(async () => {
@@ -104,7 +105,7 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const dbPath = join(directory, 'songs.sqlite');
-  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, TIME_ZONE: 'America/Detroit', TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });
   let readDb;
@@ -272,7 +273,7 @@ test('authenticated SQL queries return full read-only results and SQL deep links
   mkdirSync(join(directory, 'dist'));
   const index = '<!doctype html><title>Isolated library UI</title><div id="app"></div>';
   writeFileSync(join(directory, 'dist', 'index.html'), index);
-  const child = spawn(process.execPath, [serverPath], { env: { ...process.env, TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [serverPath], { cwd: directory, env: { ...process.env, TIME_ZONE: 'America/Detroit', TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });
   let readDb;
@@ -344,7 +345,7 @@ test('authenticated SQL queries return full read-only results and SQL deep links
   await t.test('CTEs combine JSON extraction and Detroit aggregation independently of server timezone', async () => {
     const response = await query(`-- leading comment
       WITH dated AS (
-        SELECT detroit_date(created_at) AS day, json_extract(raw_json, '$.metadata.duration') AS duration
+        SELECT local_date(created_at) AS day, json_extract(raw_json, '$.metadata.duration') AS duration
         FROM songs
       )
       SELECT day, count(*) AS songs, sum(duration) AS duration FROM dated GROUP BY day ORDER BY day;
@@ -393,5 +394,131 @@ test('authenticated SQL queries return full read-only results and SQL deep links
     const library = await fetch(base + '/api/library?limit=1', { headers: readHeaders });
     assert.equal(library.status, 200);
     assert.equal((await library.json()).total, 251);
+  });
+});
+
+test('runtime timezone configuration controls API dates and fails before database side effects', async t => {
+  const serverPath = fileURLToPath(new URL('./server.js', import.meta.url));
+  async function launch(t, { fileZone, shellZone, invalid = false, envDirectory = false } = {}) {
+    const directory = mkdtempSync(join(tmpdir(), 'suno-zone-test-'));
+    if (envDirectory) mkdirSync(join(directory, '.env'));
+    else if (fileZone !== undefined) writeFileSync(join(directory, '.env'), `TIME_ZONE=${fileZone}\n`);
+    const probe = net.createServer();
+    probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
+    const port = probe.address().port;
+    await new Promise(resolve => probe.close(resolve));
+    const dbPath = join(directory, 'archive', 'songs.sqlite');
+    const env = { ...process.env, TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath };
+    delete env.TIME_ZONE;
+    if (shellZone !== undefined) env.TIME_ZONE = shellZone;
+    const child = spawn(process.execPath, [serverPath], { cwd: directory, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', data => { stderr += data; });
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, 'exit');
+        child.kill();
+        await exited;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const outcome = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error('Server startup timeout: ' + stderr));
+      }, 10000);
+      child.stdout.on('data', data => {
+        if (String(data).includes('Install in Violentmonkey:')) {
+          clearTimeout(timer);
+          resolve({ started: true });
+        }
+      });
+      child.once('exit', code => { clearTimeout(timer); resolve({ started: false, code }); });
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+    });
+    if (invalid) {
+      assert.equal(outcome.started, false, stderr);
+      assert.notEqual(outcome.code, 0);
+      assert.equal(existsSync(join(directory, 'archive')), false);
+      return { stderr };
+    }
+    assert.equal(outcome.started, true, stderr);
+    const base = `http://127.0.0.1:${port}`;
+    const readDb = new DatabaseSync(dbPath, { readOnly: true });
+    const token = readDb.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value;
+    readDb.close();
+    const session = await (await fetch(base + '/api/session')).json();
+    const readHeaders = { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' };
+    const ingressHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const get = path => fetch(base + path, { headers: readHeaders });
+    return { base, get, readHeaders, ingressHeaders };
+  }
+
+  for (const zone of ['UTC', 'America/Los_Angeles']) {
+    await t.test(`.env ${zone} drives aggregation, inclusive/exclusive filters and local_date`, async t => {
+      const { base, get, readHeaders, ingressHeaders } = await launch(t, { fileZone: zone });
+      for (const headers of [readHeaders, ingressHeaders]) {
+        const config = await fetch(base + '/api/config', { headers });
+        assert.equal(config.status, 200);
+        assert.deepEqual(await config.json(), { time_zone: zone });
+      }
+      for (const headers of [{}, { Authorization: 'Bearer incorrect' }]) {
+        assert.equal((await fetch(base + '/api/config', { headers })).status, 401);
+      }
+      const clips = [
+        { id: 'before-midnight', created_at: '2024-03-10T07:59:59Z' },
+        { id: 'after-midnight', created_at: '2024-03-10T08:00:00Z' },
+        { id: 'after-dst', created_at: '2024-03-11T07:00:00Z' },
+        { id: 'undated' },
+      ];
+      const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips }) });
+      assert.equal(response.status, 200);
+      const days = zone === 'UTC'
+        ? [{ date: '2024-03-10', count: 2 }, { date: '2024-03-11', count: 1 }]
+        : [{ date: '2024-03-09', count: 1 }, { date: '2024-03-10', count: 1 }, { date: '2024-03-11', count: 1 }];
+      assert.deepEqual(await (await get('/api/library/timeline')).json(), {
+        days, first_date: days[0].date, last_date: days.at(-1).date, total: 4,
+      });
+      const filtered = await (await get('/api/library?from=2024-03-10&to=2024-03-11')).json();
+      assert.deepEqual(filtered.songs.map(song => song.id).sort(),
+        zone === 'UTC' ? ['after-midnight', 'before-midnight'] : ['after-midnight']);
+      assert.equal(filtered.total, zone === 'UTC' ? 2 : 1);
+      const sql = await fetch(base + '/api/query', {
+        method: 'POST', headers: readHeaders,
+        body: JSON.stringify({ sql: 'SELECT local_date(created_at) AS day, count(*) AS n FROM songs WHERE created_at IS NOT NULL GROUP BY day ORDER BY day' }),
+      });
+      assert.equal(sql.status, 200);
+      assert.deepEqual(await sql.json(), { columns: ['day', 'n'], rows: days.map(day => [day.date, day.count]) });
+      const detail = await (await get('/api/library/before-midnight')).json();
+      assert.equal(detail.clip.created_at, clips[0].created_at);
+    });
+  }
+
+  for (const settings of [
+    { name: 'absent .env defaults to Detroit', expected: 'America/Detroit' },
+    { name: 'shell timezone overrides .env', fileZone: 'America/Los_Angeles', shellZone: 'UTC', expected: 'UTC' },
+    { name: 'valid aliases retain their configured spelling', fileZone: 'US/Pacific', expected: 'US/Pacific' },
+    { name: 'shell timezone overrides an invalid file value', fileZone: 'Not/A_Timezone', shellZone: 'UTC', expected: 'UTC' },
+  ]) {
+    await t.test(settings.name, async t => {
+      const { get } = await launch(t, settings);
+      assert.deepEqual(await (await get('/api/config')).json(), { time_zone: settings.expected });
+    });
+  }
+  for (const fileZone of ['', 'Not/A_Timezone', '+03:00']) {
+    await t.test(`invalid timezone ${JSON.stringify(fileZone)} does not create a database`, async t => {
+      const { stderr } = await launch(t, { fileZone, invalid: true });
+      assert.match(stderr, /Invalid TIME_ZONE.*valid IANA timezone/);
+    });
+  }
+  for (const shellZone of ['', 'Not/A_Timezone']) {
+    await t.test(`invalid shell timezone ${JSON.stringify(shellZone)} is not replaced by .env`, async t => {
+      const { stderr } = await launch(t, { fileZone: 'UTC', shellZone, invalid: true });
+      assert.match(stderr, /Invalid TIME_ZONE.*valid IANA timezone/);
+    });
+  }
+  await t.test('an unreadable .env is not treated as an absent file', async t => {
+    const { stderr } = await launch(t, { envDirectory: true, invalid: true });
+    assert.match(stderr, /EISDIR|directory|Contents of '.env' should be a valid string/i);
   });
 });

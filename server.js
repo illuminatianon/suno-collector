@@ -5,9 +5,10 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { resolve, dirname, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadEnvFile } from 'node:process';
 
 // Usage: npm start; install http://127.0.0.1:4318/userscript.user.js in Violentmonkey.
-// SUNO_DB and PORT override the database path and loopback port. No Suno credentials are stored.
+// Optional .env configures TIME_ZONE, SUNO_DB and PORT; existing shell values take precedence.
 if (process.argv.includes('--help')) {
   console.log(`Start: npm start (Node 24+)
 Install in Violentmonkey: http://127.0.0.1:4318/userscript.user.js
@@ -19,15 +20,18 @@ The UI uses an independent process-local read-only token from GET /api/session.
 SQL UI: open /sql to run one read-only SQLite statement and download all result rows as CSV.
 POST /api/query accepts {sql:"SELECT ..."} with the library read token or persistent ingress token.
 Results are {columns:[...],rows:[[...]]}, preserving strings, numbers, and nulls without pagination or a hidden limit.
-SELECT and CTE queries support json_extract and detroit_date(timestamp); archive writes are rejected.
+SELECT and CTE queries support json_extract and local_date(timestamp); archive writes are rejected.
 GET /api/library?limit=100&offset=0&q=title lists songs; GET /api/library/<id> returns all clip data.
-GET /api/library/timeline returns America/Detroit day counts, first_date, last_date, and total (including undated songs).
-Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in America/Detroit; either is optional.
+GET /api/config returns {time_zone} with the library read token or persistent ingress token.
+GET /api/library/timeline returns configured local day counts, first_date, last_date, and total (including undated songs).
+Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in TIME_ZONE; either is optional.
 Date boundaries must be real calendar dates with from < to; dated queries omit unparseable/undated songs.
 Then reload Suno once and browse Library manually. The adapter does not scroll or request songs.
 Console prefix: [Suno collector]. Violentmonkey menu: status, pause/resume delivery, retry.
 Offline captures persist in extension storage; retries contact only localhost every 15 seconds.
-Configuration: SUNO_DB=./data/songs.sqlite PORT=4318
+Configuration: optional .env in the working directory; shell values take precedence.
+TIME_ZONE=America/Detroit SUNO_DB=./data/songs.sqlite PORT=4318
+TIME_ZONE must be a valid IANA timezone; restart the server and reload the browser after changing it.
 Storage: songs.id is the primary key; raw_json preserves every clip field, including metadata.prompt lyrics.
 Identical JSON is a no-op; changed JSON replaces the same row. Different song IDs remain distinct.
 GET /health returns a count. Authenticated GET /api/songs?limit=100&after=<id> exports full clips.
@@ -37,6 +41,22 @@ Keep that script and the database private. Install on the same machine as the lo
 Only visible feed categories are captured; no claim of complete library coverage.
 SQL example: SELECT title, json_extract(raw_json, '$.metadata.prompt') AS lyrics FROM songs;`);
   process.exit(0);
+}
+try {
+  loadEnvFile();
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+const timeZone = process.env.TIME_ZONE ?? 'America/Detroit';
+let dayFormatter;
+try {
+  // Reject offset identifiers too: the runtime setting is an IANA timezone, not a fixed offset.
+  if (!timeZone || /^[+-]/.test(timeZone)) throw new RangeError('Not an IANA timezone');
+  dayFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+} catch {
+  throw new Error(`Invalid TIME_ZONE ${JSON.stringify(timeZone)}: expected a valid IANA timezone (for example America/Detroit or UTC)`);
 }
 const port = Number(process.env.PORT || 4318);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -66,10 +86,7 @@ const token = db.prepare('SELECT value FROM settings WHERE key=?').get('ingress_
 const readToken = randomBytes(32).toString('hex');
 const queryDb = new DatabaseSync(dbPath, { readOnly: true });
 const distPath = fileURLToPath(new URL('./dist/', import.meta.url));
-const dayFormatter = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'America/Detroit', year: 'numeric', month: '2-digit', day: '2-digit',
-});
-function detroitDate(timestamp) {
+function localDate(timestamp) {
   if (timestamp === null) return null;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return null;
@@ -82,12 +99,12 @@ function detroitDate(timestamp) {
   return `${year.padStart(4, '0')}-${month}-${day}`;
 }
 for (const connection of [db, queryDb]) {
-  connection.function('detroit_date', { deterministic: true }, detroitDate);
+  connection.function('local_date', { deterministic: true }, localDate);
 }
-// Reject impossible stored dates; normalize to UTC before the explicit Detroit conversion.
+// Reject impossible stored dates; normalize to UTC before the configured local conversion.
 const songDate = `CASE
   WHEN date(substr(created_at, 1, 10), '+0 days') = substr(created_at, 1, 10)
-  THEN detroit_date(strftime('%Y-%m-%dT%H:%M:%fZ', created_at)) END`;
+  THEN local_date(strftime('%Y-%m-%dT%H:%M:%fZ', created_at)) END`;
 const libraryWhere = `coalesce(title, '') LIKE ? ESCAPE '\\'
   AND (? IS NULL OR ${songDate} >= ?)
   AND (? IS NULL OR ${songDate} < ?)`;
@@ -215,6 +232,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/session') {
       if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site session requests are forbidden' });
       return send(res, 200, { token: readToken });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/config') {
+      if (!authorized(req, readToken) && !authorized(req)) return send(res, 401, { error: 'Bearer token required' });
+      return send(res, 200, { time_zone: timeZone });
     }
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/sql' || url.pathname.startsWith('/assets/'))) {
       return await serveUi(res, url.pathname);

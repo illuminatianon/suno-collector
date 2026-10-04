@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 const props = defineProps({
+  timeZone: { type: String, required: true },
   timeline: { type: Object, required: true },
   year: { type: Number, required: true },
   selectedDay: { type: String, default: null },
@@ -9,7 +10,8 @@ const props = defineProps({
   error: { type: String, default: '' },
 })
 const emit = defineEmits(['select', 'year', 'clear', 'retry'])
-const currentYear = Number(new Intl.DateTimeFormat('en', { timeZone: 'America/Detroit', year: 'numeric' }).format(new Date()))
+const yearFormatter = new Intl.DateTimeFormat('en', { timeZone: props.timeZone, year: 'numeric' })
+const currentYear = Number(yearFormatter.format(new Date()))
 const firstYear = computed(() => Number(props.timeline.first_date?.slice(0, 4)) || currentYear)
 const lastYear = computed(() => Number(props.timeline.last_date?.slice(0, 4)) || currentYear)
 const counts = computed(() => new Map(props.timeline.days.map(day => [day.date, day.count])))
@@ -38,7 +40,7 @@ const calendar = computed(() => {
 const selectedCount = computed(() => counts.value.get(props.selectedDay) || 0)
 const datedTotal = computed(() => props.timeline.days.reduce((total, day) => total + day.count, 0))
 function label(day) {
-  return `${day.date} America/Detroit: ${day.count.toLocaleString()} ${day.count === 1 ? 'song' : 'songs'}`
+  return `${day.date} ${props.timeZone}: ${day.count.toLocaleString()} ${day.count === 1 ? 'song' : 'songs'}`
 }
 </script>
 
@@ -47,7 +49,7 @@ function label(day) {
     <div class="timeline-heading-line">
       <div>
         <h2 id="timeline-heading">Capture timeline</h2>
-        <p class="muted timeline-summary">Stored song creation dates · America/Detroit calendar days</p>
+        <p class="muted timeline-summary">Stored song creation dates · {{ timeZone }} calendar days</p>
       </div>
       <div class="year-controls" aria-label="Calendar year">
         <v-btn size="small" :disabled="loading || year <= firstYear" aria-label="Previous year" @click="emit('year', year - 1)">Previous</v-btn>
@@ -65,7 +67,7 @@ function label(day) {
         {{ timeline.total.toLocaleString() }} songs total · First: {{ timeline.first_date || 'No dated songs' }} · Last: {{ timeline.last_date || 'No dated songs' }}
         <span v-if="timeline.total > datedTotal"> · {{ (timeline.total - datedTotal).toLocaleString() }} without a usable date</span>
       </p>
-      <p v-if="!loading && !timeline.days.length" class="timeline-summary muted">No dated songs captured yet. Days below have no captured songs.</p>
+      <p v-if="!loading && !timeline.days.length" class="timeline-summary muted">No dated songs captured yet. {{ timeZone }} calendar days below have no captured songs.</p>
       <div class="calendar-scroll" tabindex="0" aria-label="Year calendar, scroll horizontally to see every month">
         <div class="calendar-layout" :style="{ '--weeks': calendar.columns }">
           <div class="calendar-months" aria-hidden="true">
@@ -78,7 +80,7 @@ function label(day) {
         </div>
       </div>
       <div class="timeline-bottom">
-        <p class="timeline-summary" aria-live="polite">{{ selectedDay ? `${selectedDay} America/Detroit · ${selectedCount.toLocaleString()} songs captured` : 'Select a day to filter the song list.' }} <v-btn v-if="selectedDay" size="small" @click="emit('clear')">Clear date filter</v-btn></p>
+        <p class="timeline-summary" aria-live="polite">{{ selectedDay ? `${selectedDay} ${timeZone} · ${selectedCount.toLocaleString()} songs captured` : 'Select a day to filter the song list.' }} <v-btn v-if="selectedDay" size="small" @click="emit('clear')">Clear date filter</v-btn></p>
         <div class="calendar-legend muted" aria-label="Color intensity indicates fewer to more songs"><span>Less</span><span v-for="level in 5" :key="level" class="calendar-swatch" :class="`level-${level - 1}`" /><span>More</span></div>
       </div>
     </template>

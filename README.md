@@ -44,7 +44,7 @@ The **Songs** view provides title search, a newest-first list, and a detail pane
 
 The **Timeline** view shows daily creation counts as a calendar heatmap. Select a day to filter the same song list, use previous/next to change years, or clear the date filter to return to the full list.
 
-Timeline grouping, date filters, and formatted timestamps use **America/Detroit**, including daylight saving time. Original timestamps remain unchanged in the database and raw JSON. Undated or invalid timestamps count toward the archive total but do not appear in daily buckets.
+Timeline grouping, date filters, and formatted timestamps use the timezone configured by `TIME_ZONE` (default **America/Detroit**), including daylight saving time. The UI fetches the active timezone from the server; raw timestamps remain unchanged in the database and JSON. Undated or invalid timestamps count toward the archive total but do not appear in daily buckets.
 
 ## SQL query tool
 
@@ -52,10 +52,10 @@ Open **http://127.0.0.1:4318/sql**, or use the **SQL query** navigation link.
 
 Enter a read-only query, click **Run query**, or press **Ctrl+Enter** (**Cmd+Enter** on Mac). Results appear in a table and can be downloaded as CSV. All returned rows are loaded; add `LIMIT` yourself if desired. The tool handles strings, numbers, and nulls, reports SQL errors, and rejects archive writes.
 
-SQLite JSON functions and the Detroit date helper are available. For example:
+SQLite JSON functions and `local_date(timestamp)` (using the configured timezone) are available. For example:
 
 ```sql
-SELECT detroit_date(created_at) AS day, count(*) AS clips
+SELECT local_date(created_at) AS day, count(*) AS clips
 FROM songs
 WHERE created_at IS NOT NULL
 GROUP BY day
@@ -75,8 +75,11 @@ npm test                # Isolated API/SQLite and CSV tests
 node server.js --help   # API and installation details
 ```
 
-Set configuration through shell environment variables:
+Copy `.env.example` to `.env` and edit `TIME_ZONE` to an IANA timezone, for example `America/Los_Angeles`. Restart the server and reload the browser after changing it; no rebuild or database migration is needed. The server refuses invalid timezone names rather than mislabeling dates. Shell environment variables override `.env`.
 
+Supported settings:
+
+- `TIME_ZONE`: IANA timezone used for the calendar, date filters, displayed timestamps, and `local_date()`; defaults to `America/Detroit`.
 - `PORT`: server port, default `4318`.
 - `SUNO_DB`: SQLite path, default `data/songs.sqlite`.
 
