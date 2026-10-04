@@ -19,6 +19,24 @@ const songs = ref([])
 const total = ref(0)
 const inventory = ref(null)
 const query = ref('')
+const filters = ref({
+  model: '', major_model_version: '', task: '', status: '', visibility: '', remix: '', user: '', persona: '',
+  min_duration: '', max_duration: '', min_plays: '', min_likes: '',
+})
+const textFilterKeys = ['model', 'major_model_version', 'task', 'status', 'user', 'persona', 'min_duration', 'max_duration', 'min_plays', 'min_likes']
+const appliedText = ref(Object.fromEntries(textFilterKeys.map(key => [key, ''])))
+const hasFilters = computed(() => !!query.value || !!selectedDay.value || Object.values(filters.value).some(Boolean))
+const emptyMessage = computed(() => {
+  if (hasFilters.value) return selectedDay.value
+    ? `No songs on this ${props.timeZone} day match your filters. Try another day or clear filters.`
+    : 'No songs match your search and filters. Try changing or clearing them.'
+  return 'No songs captured yet. Browse Suno with the collector enabled, then refresh.'
+})
+function clearFilters() {
+  query.value = ''
+  selectedDay.value = null
+  for (const key of Object.keys(filters.value)) filters.value[key] = ''
+}
 const loading = ref(false)
 const listError = ref('')
 const selectedId = ref(null)
@@ -82,6 +100,12 @@ async function loadSongs(append = false) {
   const offset = append ? songs.value.length : 0
   try {
     const params = new URLSearchParams({ limit: '100', offset: String(offset), q: query.value })
+    for (const key of ['visibility', 'remix']) {
+      if (filters.value[key]) params.set(key, filters.value[key])
+    }
+    for (const key of textFilterKeys) {
+      if (appliedText.value[key] !== '') params.set(key, appliedText.value[key])
+    }
     if (selectedDay.value) {
       const next = new Date(`${selectedDay.value}T00:00:00Z`)
       // Advance a calendar label, not a local instant: DST must not change the next date.
@@ -200,14 +224,22 @@ watch(view, value => {
   }
 }, { flush: 'sync' })
 
-watch(query, () => {
+function scheduleSongs(debounce) {
   ++listSequence
   listController?.abort()
   loading.value = true
   listError.value = ''
   clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => loadSongs(), 250)
-})
+  const run = () => {
+    for (const key of textFilterKeys) appliedText.value[key] = filters.value[key].trim()
+    loadSongs()
+  }
+  if (debounce) searchTimer = setTimeout(run, 250)
+  else run()
+}
+watch(query, () => scheduleSongs(true))
+watch(() => textFilterKeys.map(key => filters.value[key]), () => scheduleSongs(true))
+watch(() => [filters.value.visibility, filters.value.remix], () => scheduleSongs(false))
 onMounted(() => loadSongs())
 onBeforeUnmount(() => {
   clearTimeout(searchTimer)
@@ -305,9 +337,28 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             <v-btn size="small" :aria-pressed="view === 'timeline'" :class="{ 'active-view': view === 'timeline' }" @click="view = 'timeline'">Timeline</v-btn>
           </div>
           <p v-if="selectedDay" class="date-filter">Date: {{ selectedDay }} {{ timeZone }} <v-btn size="small" @click="selectedDay = null">Clear</v-btn></p>
-          <v-text-field v-model="query" label="Search song titles" variant="outlined" density="compact" hide-details />
-          <p v-if="query" class="search-count muted" aria-live="polite">{{ loading ? 'Searching…' : `${total.toLocaleString()} matching songs` }}</p>
-          <v-btn v-if="query" size="small" @click="query = ''">Clear search</v-btn>
+          <v-text-field v-model="query" label="Search titles, lyrics & style tags" variant="outlined" density="compact" hide-details />
+          <div class="library-filter-actions">
+            <details class="library-filters">
+              <summary>Filters<span v-if="hasFilters" class="filter-active">Active</span></summary>
+              <div class="filter-grid">
+                <v-text-field v-model="filters.model" label="Model" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.major_model_version" label="Generation" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.task" label="Task" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.status" label="Status" variant="outlined" density="compact" hide-details />
+                <v-select v-model="filters.visibility" label="Visibility" :items="[{ title: 'Any', value: '' }, { title: 'Public', value: 'public' }, { title: 'Private', value: 'private' }]" variant="outlined" density="compact" hide-details />
+                <v-select v-model="filters.remix" label="Remix" :items="[{ title: 'Any', value: '' }, { title: 'Yes', value: 'yes' }, { title: 'No', value: 'no' }]" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.user" label="User ID contains" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.persona" label="Persona ID contains" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.min_duration" label="Min duration (seconds)" type="number" min="0" step="1" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.max_duration" label="Max duration (seconds)" type="number" min="0" step="1" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.min_plays" label="Min plays" type="number" min="0" step="1" variant="outlined" density="compact" hide-details />
+                <v-text-field v-model="filters.min_likes" label="Min likes" type="number" min="0" step="1" variant="outlined" density="compact" hide-details />
+              </div>
+            </details>
+            <v-btn v-if="hasFilters" size="small" variant="text" @click="clearFilters">Clear all filters</v-btn>
+          </div>
+          <p class="search-count muted" aria-live="polite">{{ loading ? 'Searching…' : `${total.toLocaleString()} ${hasFilters ? 'matching' : 'captured'} songs` }}</p>
         </header>
         <div class="song-scroll" :aria-busy="loading">
           <v-progress-linear v-if="loading" indeterminate color="primary" aria-label="Loading songs" />
@@ -315,7 +366,7 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             <p>{{ listError }}</p>
             <v-btn @click="loadSongs()">Retry library</v-btn>
           </div>
-          <p v-if="!loading && !listError && !songs.length" class="state muted">{{ selectedDay ? (query ? `No songs on this ${timeZone} day match your title search.` : `No songs captured on this ${timeZone} day. Select another day or clear the date filter.`) : query ? 'No songs match this title. Try another search.' : 'No songs captured yet. Browse Suno with the collector enabled, then refresh.' }}</p>
+          <p v-if="!loading && !listError && !songs.length" class="state muted">{{ emptyMessage }}</p>
           <ul class="song-list">
             <li v-for="song in songs" :key="song.id">
               <button class="song-row" :class="{ selected: song.id === selectedId }" :aria-current="song.id === selectedId ? 'true' : undefined" @click="selectSong(song.id)">
@@ -326,7 +377,7 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             </li>
           </ul>
           <div v-if="songs.length" class="list-end">
-            <p class="muted">{{ songs.length.toLocaleString() }} of {{ total.toLocaleString() }}{{ query ? ' matches' : ' songs' }}</p>
+            <p class="muted">{{ songs.length.toLocaleString() }} of {{ total.toLocaleString() }}{{ hasFilters ? ' matches' : ' songs' }}</p>
             <v-btn v-if="songs.length < total" variant="outlined" :disabled="loading" @click="loadSongs(true)">Load more songs</v-btn>
           </div>
         </div>

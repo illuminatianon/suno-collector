@@ -15,14 +15,16 @@ if (process.argv.includes('--help')) {
 Install generated /userscript.user.js in a compatible userscript extension (e.g. Violentmonkey); update old v1.0.0 installs to v1.1.0.
 Library UI: run npm install and npm run build, then open http://127.0.0.1:4318/.
 UI development: keep npm start running, then npm run dev for Vite with the same local API.
-Use Refresh to pick up newly captured songs; search matches titles and Load more fetches 100 summaries.
+Use Refresh to pick up newly captured songs; search matches titles, lyrics and style tags. Filters combine with search and Load more fetches 100 summaries.
 Select a song for full lyrics and metadata; Full captured JSON exposes every field without loading remote media.
 The UI uses an independent process-local session token from GET /api/session; it can edit settings but cannot ingest songs.
 SQL UI: open /sql to run one read-only SQLite statement and download all result rows as CSV.
 POST /api/query accepts {sql:"SELECT ..."} with the library read token or persistent ingress token.
 Results are {columns:[...],rows:[[...]]}, preserving strings, numbers, and nulls without pagination or a hidden limit.
 SELECT and CTE queries support json_extract and local_date(timestamp); archive writes are rejected.
-GET /api/library?limit=100&offset=0&q=title lists songs; GET /api/library/<id> returns all clip data.
+GET /api/library?limit=100&offset=0&q=text lists songs; GET /api/library/<id> returns all clip data.
+Library filters: model, major_model_version, task and status exact; user and persona substring;
+visibility=public|private, remix=yes|no, min_duration/max_duration (seconds), min_plays/min_likes.
 GET /api/config returns {time_zone} with the library read token or persistent ingress token.
 GET/PUT /api/settings reads or saves Suno User ID, ingest mode and time zone with either bearer token.
 Open /settings to set a Suno User ID and capture mode before first ingest.
@@ -138,9 +140,35 @@ for (const connection of [db, queryDb]) {
 const songDate = `CASE
   WHEN date(substr(created_at, 1, 10), '+0 days') = substr(created_at, 1, 10)
   THEN local_date(strftime('%Y-%m-%dT%H:%M:%fZ', created_at)) END`;
-const libraryWhere = `coalesce(title, '') LIKE ? ESCAPE '\\'
-  AND (? IS NULL OR ${songDate} >= ?)
-  AND (? IS NULL OR ${songDate} < ?)`;
+const libraryWhere = `(
+  coalesce(title, '') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.metadata.prompt') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.metadata.lyrics') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.metadata.lyric') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.metadata.display_lyrics') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.metadata.full_lyrics') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.lyrics') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.lyric') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.prompt') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.display_lyrics') LIKE :q ESCAPE '\\'
+  OR json_extract(raw_json, '$.full_lyrics') LIKE :q ESCAPE '\\'
+  OR coalesce(tags, '') LIKE :q ESCAPE '\\'
+  OR coalesce(negative_tags, '') LIKE :q ESCAPE '\\'
+)
+  AND (:from IS NULL OR ${songDate} >= :from)
+  AND (:to IS NULL OR ${songDate} < :to)
+  AND (:model IS NULL OR model_name = :model)
+  AND (:major_model_version IS NULL OR major_model_version = :major_model_version)
+  AND (:task IS NULL OR task = :task)
+  AND (:status IS NULL OR status = :status)
+  AND (:visibility IS NULL OR is_public = :visibility)
+  AND (:remix IS NULL OR is_remix = :remix)
+  AND (:user IS NULL OR coalesce(user_id, '') LIKE :user ESCAPE '\\')
+  AND (:persona IS NULL OR coalesce(persona_id, '') LIKE :persona ESCAPE '\\')
+  AND (:min_duration IS NULL OR duration >= :min_duration)
+  AND (:max_duration IS NULL OR duration <= :max_duration)
+  AND (:min_plays IS NULL OR play_count >= :min_plays)
+  AND (:min_likes IS NULL OR upvote_count >= :min_likes)`;
 const libraryCount = db.prepare(`SELECT count(*) AS n FROM songs WHERE ${libraryWhere}`);
 const totalCount = db.prepare('SELECT count(*) AS n FROM songs');
 const timelineDays = db.prepare(`
@@ -152,7 +180,7 @@ const timelineDays = db.prepare(`
 const libraryRows = db.prepare(`
   SELECT id, title, user_id, created_at, model_name, status, duration, tags
   FROM songs WHERE ${libraryWhere}
-  ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+  ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset
 `);
 const librarySong = db.prepare('SELECT raw_json, persona_id, first_captured_at, updated_at FROM songs WHERE id=?');
 const libraryPersona = db.prepare('SELECT * FROM personas WHERE id=?');
@@ -311,6 +339,18 @@ function pageInteger(params, name, fallback, min, max) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= min && number <= max ? number : null;
 }
+function literalLike(value) { return '%' + value.replace(/[\\%_]/g, '\\$&') + '%'; }
+function optionalText(params, name) {
+  const value = params.get(name);
+  return value === null || (value.trim().length > 0 && value.length <= 200) ? value : false;
+}
+function durationParam(params, name) {
+  const value = params.get(name);
+  if (value === null) return null;
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return false;
+  const number = Number(value);
+  return Number.isFinite(number) && number <= Number.MAX_SAFE_INTEGER ? number : false;
+}
 const server = http.createServer(async (req, res) => {
   // Host allowlisting prevents DNS rebinding. No CORS permission is granted to websites.
   if (![ `127.0.0.1:${port}`, `localhost:${port}` ].includes(req.headers.host)) return send(res, 403, { error: 'Invalid host' });
@@ -361,10 +401,35 @@ const server = http.createServer(async (req, res) => {
         if (!validDate(from) || !validDate(to) || (from !== null && to !== null && from >= to)) {
           return send(res, 400, { error: 'from/to must be real YYYY-MM-DD calendar dates with from < to' });
         }
-        const query = '%' + (url.searchParams.get('q') || '').replace(/[\\%_]/g, '\\$&') + '%';
+        const textFilters = Object.fromEntries(['model', 'major_model_version', 'task', 'status', 'user', 'persona']
+          .map(name => [name, optionalText(url.searchParams, name)]));
+        const visibility = url.searchParams.get('visibility');
+        const remix = url.searchParams.get('remix');
+        const min_duration = durationParam(url.searchParams, 'min_duration');
+        const max_duration = durationParam(url.searchParams, 'max_duration');
+        const min_plays = pageInteger(url.searchParams, 'min_plays', null, 0, Number.MAX_SAFE_INTEGER);
+        const min_likes = pageInteger(url.searchParams, 'min_likes', null, 0, Number.MAX_SAFE_INTEGER);
+        if (Object.values(textFilters).includes(false) ||
+            (visibility !== null && visibility !== 'public' && visibility !== 'private') ||
+            (remix !== null && remix !== 'yes' && remix !== 'no') ||
+            min_duration === false || max_duration === false ||
+            (min_duration !== null && max_duration !== null && min_duration > max_duration) ||
+            (url.searchParams.has('min_plays') && min_plays === null) ||
+            (url.searchParams.has('min_likes') && min_likes === null)) {
+          return send(res, 400, { error: 'Invalid library filter' });
+        }
+        const filters = {
+          q: literalLike(url.searchParams.get('q') || ''), from, to,
+          ...textFilters,
+          user: textFilters.user === null ? null : literalLike(textFilters.user),
+          persona: textFilters.persona === null ? null : literalLike(textFilters.persona),
+          visibility: visibility === null ? null : Number(visibility === 'public'),
+          remix: remix === null ? null : Number(remix === 'yes'),
+          min_duration, max_duration, min_plays, min_likes,
+        };
         return send(res, 200, {
-          songs: libraryRows.all(query, from, from, to, to, limit, offset),
-          total: libraryCount.get(query, from, from, to, to).n,
+          songs: libraryRows.all({ ...filters, limit, offset }),
+          total: libraryCount.get(filters).n,
           total_songs: totalCount.get().n,
         });
       }

@@ -105,6 +105,75 @@ import { fileURLToPath } from 'node:url';
       assert.equal((await get('/api/library?' + query)).status, 400);
     }
   });
+  await t.test('library search and promoted filters compose with dates, counts, pagination and null flags', async () => {
+    const shared = {
+      user_id: 'account%_east', model_name: 'v4', major_model_version: 'v4.5',
+      status: 'complete', play_count: 10, upvote_count: 3, is_public: true,
+      metadata: { task: 'text2audio', duration: 60, is_remix: true, persona_id: 'persona%_one',
+        prompt: 'Amber refrain', lyrics: 'Silver chorus', lyric: 'Midnight repeat',
+        display_lyrics: 'Golden verse', full_lyrics: 'Violet stanza', tags: 'Neon Pop', negative_tags: 'Harsh grain' },
+    };
+    assert.equal((await (await post([
+      { ...shared, id: 'filter-a', title: 'Orbit Alpha', created_at: '2025-01-01T05:00:00Z',
+        lyrics: 'Root cadence', prompt: 'Canvas refrain', display_lyrics: 'Skyward lines', full_lyrics: 'Crystal refrain',
+        unknown_future_field: { secret: 'hidden archive marker' } },
+      { ...shared, id: 'filter-b', title: 'Orbit Beta', created_at: '2025-01-02T05:00:00Z' },
+      { ...shared, id: 'filter-no-flags', title: 'Orbit Missing', created_at: '2025-01-03T05:00:00Z',
+        is_public: undefined, metadata: { ...shared.metadata, is_remix: undefined } },
+      { ...shared, id: 'filter-other', title: 'Orbit Other', created_at: '2025-01-02T06:00:00Z',
+        user_id: 'accountXXeast', major_model_version: 'v5', model_name: 'v5', status: 'pending',
+        is_public: false, play_count: 0, upvote_count: 0,
+        metadata: { ...shared.metadata, prompt: 'Different refrain', lyrics: 'Other chorus',
+          display_lyrics: 'Other verse', duration: 0, task: 'instrumental', is_remix: false, persona_id: 'personaXXone' } },
+    ])).json()).inserted, 4);
+    const session = await (await fetch(base + '/api/session')).json();
+    const get = query => fetch(base + '/api/library?' + query, { headers: { Authorization: `Bearer ${session.token}` } });
+    const library = async query => {
+      const response = await get(query);
+      assert.equal(response.status, 200, query);
+      return response.json();
+    };
+    const ids = async query => (await library(query)).songs.map(song => song.id);
+    for (const [term, expected] of [
+      ['orbit alpha', ['filter-a']], ['Silver chorus', ['filter-b', 'filter-no-flags', 'filter-a']],
+      ['Golden verse', ['filter-b', 'filter-no-flags', 'filter-a']], ['Midnight repeat', ['filter-b', 'filter-no-flags', 'filter-a', 'filter-other']],
+      ['Violet stanza', ['filter-b', 'filter-no-flags', 'filter-a', 'filter-other']], ['Crystal refrain', ['filter-a']],
+      ['Root cadence', ['filter-a']], ['Canvas refrain', ['filter-a']], ['Skyward lines', ['filter-a']],
+      ['Neon Pop', ['filter-b', 'filter-no-flags', 'filter-a', 'filter-other']],
+      ['Harsh grain', ['filter-b', 'filter-no-flags', 'filter-a', 'filter-other']],
+      ['hidden archive marker', []], ['%', ['library-a']],
+    ]) {
+      const query = 'q=' + encodeURIComponent(term);
+      const actual = await ids(query);
+      if (term === '%') assert.deepEqual(actual, expected);
+      else assert.deepEqual(actual.sort(), expected.sort(), query);
+    }
+    const scoped = 'q=Amber&model=v4&major_model_version=v4.5&task=text2audio&status=complete' +
+      '&visibility=public&remix=yes&user=' + encodeURIComponent('%_east') +
+      '&persona=' + encodeURIComponent('%_one') +
+      '&min_duration=60&max_duration=60&min_plays=10&min_likes=3&from=2025-01-01&to=2025-01-03';
+    const first = await library(scoped + '&limit=1');
+    const second = await library(scoped + '&limit=1&offset=1');
+    assert.deepEqual(first.songs.map(song => song.id), ['filter-b']);
+    assert.deepEqual(second.songs.map(song => song.id), ['filter-a']);
+    assert.equal(first.total, 2);
+    assert.equal(second.total, 2);
+    assert.equal(first.total_songs, 9);
+    assert.deepEqual((await library(scoped + '&offset=2')).songs, []);
+    assert.deepEqual(await ids(scoped.replace('from=2025-01-01', 'from=2025-01-02')), ['filter-b']);
+    assert.deepEqual(await ids('model=v5&major_model_version=v5&task=instrumental&status=pending&visibility=private&remix=no&min_duration=0&max_duration=0&min_plays=0&min_likes=0'), ['filter-other']);
+    assert.deepEqual(await ids('q=Orbit&visibility=public&remix=yes'), ['filter-b', 'filter-a']);
+    assert.deepEqual(await ids('q=Orbit&visibility=private&remix=no'), ['filter-other']);
+    assert.deepEqual(await ids('q=Orbit&min_duration=60&max_duration=60&min_plays=10&min_likes=3'), ['filter-no-flags', 'filter-b', 'filter-a']);
+    assert.deepEqual(await ids('q=Orbit&user=' + encodeURIComponent('%_east') + '&persona=' + encodeURIComponent('%_one')), ['filter-no-flags', 'filter-b', 'filter-a']);
+    for (const query of [
+      'visibility=', 'visibility=PUBLIC', 'remix=', 'remix=true',
+      'min_duration=', 'max_duration=-1', 'min_duration=1e3', 'max_duration=Infinity',
+      'min_duration=2&max_duration=1', 'min_plays=-1', 'min_likes=1.5',
+      'min_plays=9007199254740992', 'min_likes=', 'major_model_version=', 'task=',
+      'major_model_version=' + 'x'.repeat(201),
+    ]) assert.equal((await get(query)).status, 400, query);
+  });
   await t.test('detail resolves the persisted merged persona for referencing songs without changing captured clips', async () => {
     const personaId = 'fca4108a-77da-4b54-941a-a65bf470d369';
     const source = { id: 'persona-source', persona: {
