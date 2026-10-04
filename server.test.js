@@ -343,6 +343,7 @@ test('authenticated SQL queries return full read-only results and SQL deep links
   const dbPath = join(directory, 'songs.sqlite');
   const serverPath = join(directory, 'server.mjs');
   copyFileSync(new URL('./server.js', import.meta.url), serverPath);
+  copyFileSync(new URL('./migrations.js', import.meta.url), join(directory, 'migrations.js'));
   mkdirSync(join(directory, 'dist'));
   const index = '<!doctype html><title>Isolated library UI</title><div id="app"></div>';
   writeFileSync(join(directory, 'dist', 'index.html'), index);
@@ -453,7 +454,7 @@ test('authenticated SQL queries return full read-only results and SQL deep links
       'DELETE FROM songs',
       "UPDATE songs SET title='destroyed'",
       'DROP TABLE songs',
-      "INSERT INTO songs SELECT 'forbidden', title, user_id, created_at, model_name, status, raw_json, first_captured_at, updated_at FROM songs LIMIT 1",
+      "INSERT INTO songs (id, title, user_id, created_at, model_name, status, raw_json, first_captured_at, updated_at) SELECT 'forbidden', title, user_id, created_at, model_name, status, raw_json, first_captured_at, updated_at FROM songs LIMIT 1",
       'PRAGMA user_version=99',
       'BEGIN TRANSACTION',
       "ATTACH DATABASE ':memory:' AS scratch",
@@ -463,7 +464,7 @@ test('authenticated SQL queries return full read-only results and SQL deep links
       assert.match((await response.json()).error, /readonly|read-only/i);
     }
     assert.deepEqual(readDb.prepare('SELECT * FROM songs ORDER BY id').all(), before);
-    assert.equal(readDb.prepare('PRAGMA user_version').get().user_version, 0);
+    assert.equal(readDb.prepare('PRAGMA user_version').get().user_version, 2);
     const response = await query('SELECT count(*) AS songs FROM songs');
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { columns: ['songs'], rows: [[251]] });

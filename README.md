@@ -49,6 +49,12 @@ The server records `first_captured_at` and `updated_at` as UTC ISO timestamps (`
 
 Capture is limited to responses the Suno UI actually loads. Hidden categories and filters can affect coverage; the archive is not automatically guaranteed to contain every song. Separate attribution responses are not currently captured.
 
+## Schema and backups
+
+The database uses SQLite `PRAGMA user_version` (current version: **2**). On startup, a new archive is created directly at v2. An existing legacy v1 archive is backed up with SQLite's snapshot API—including committed WAL data—before an atomic migration. The backup has a timestamped `.backup-…sqlite` filename beside the database. Startup logs the detected version, backup path, migration progress, or that the schema is current; a failed migration rolls back and stops the server. Backups contain private song data; keep them local.
+
+V2 promotes `major_model_version`, `duration`, `is_public`, `play_count`, `upvote_count`, `task`, `is_remix`, `persona_id`, `tags`, and `negative_tags` into queryable `songs` columns. Missing values stay `NULL`; the complete, unchanged `raw_json` remains the canonical archive. Future captures update promoted fields alongside it. A `personas` table collects available persona metadata by UUID, retaining known values when later clips omit them. These columns and the persona table are available through the SQL query tool.
+
 ## Library and timeline
 
 The **Songs** view provides title search, a newest-first list, and a detail panel with complete captured metadata.
@@ -88,7 +94,7 @@ node server.js --help   # API and installation details
 
 Use **http://127.0.0.1:4318/settings** to edit Suno User ID, capture mode, and timezone. The timezone control lists names from `Intl.supportedValuesOf('timeZone')` and also supports UTC. Settings persist in the database's existing `settings` table.
 
-`.env` is optional for server startup. `TIME_ZONE` is a **first-run bootstrap only**: it seeds the saved timezone if none exists, and later edits to the environment do not override the saved value. Shell environment variables override `.env` when that initial value is read. No database migration or rebuild is needed.
+`.env` is optional for server startup. `TIME_ZONE` is a **first-run bootstrap only**: it seeds the saved timezone if none exists, and later edits to the environment do not override the saved value. Shell environment variables override `.env` when that initial value is read. Changing the saved timezone needs neither a schema migration nor a frontend rebuild.
 
 - `TIME_ZONE`: first-run timezone seed; default `America/Detroit`. After initial setup, change the timezone in-app.
 - `PORT`: server port, default `4318`.

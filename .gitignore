@@ -2,6 +2,7 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.backup-*
 /node_modules/
 /dist/
 repomix-output.xml

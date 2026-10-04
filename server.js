@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
+import { initializeSchema, extractClip, preparePersonaUpsert, promotedNames } from './migrations.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
@@ -71,24 +72,9 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invali
 const dbPath = resolve(process.env.SUNO_DB || 'data/songs.sqlite');
 mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(dbPath);
-db.exec(`
-  PRAGMA journal_mode=WAL;
-  PRAGMA busy_timeout=5000;
-  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS songs (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    user_id TEXT,
-    created_at TEXT,
-    model_name TEXT,
-    status TEXT,
-    raw_json TEXT NOT NULL CHECK(json_valid(raw_json)),
-    first_captured_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS songs_created_at ON songs(created_at);
-  CREATE INDEX IF NOT EXISTS songs_user_id ON songs(user_id);
-`);
+db.exec('PRAGMA busy_timeout=5000');
+await initializeSchema(db, dbPath);
+db.exec('PRAGMA journal_mode=WAL');
 const setting = db.prepare('SELECT value FROM settings WHERE key=?');
 const storeSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
 const storedZone = setting.get('time_zone')?.value;
@@ -164,9 +150,7 @@ const timelineDays = db.prepare(`
   GROUP BY day ORDER BY day ASC
 `);
 const libraryRows = db.prepare(`
-  SELECT id, title, user_id, created_at, model_name, status,
-    coalesce(json_extract(raw_json, '$.metadata.duration'), json_extract(raw_json, '$.duration')) AS duration,
-    coalesce(json_extract(raw_json, '$.metadata.tags'), json_extract(raw_json, '$.tags')) AS tags
+  SELECT id, title, user_id, created_at, model_name, status, duration, tags
   FROM songs WHERE ${libraryWhere}
   ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
 `);
@@ -174,8 +158,12 @@ const librarySong = db.prepare('SELECT raw_json, first_captured_at, updated_at F
 const base = `http://127.0.0.1:${port}`;
 const getSong = db.prepare('SELECT raw_json FROM songs WHERE id=?');
 const ownedRemixes = db.prepare('SELECT id, raw_json FROM songs WHERE lower(trim(user_id))=?');
-const insert = db.prepare('INSERT INTO songs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-const update = db.prepare('UPDATE songs SET title=?, user_id=?, created_at=?, model_name=?, status=?, raw_json=?, updated_at=? WHERE id=?');
+const insert = db.prepare(`INSERT INTO songs
+  (id, title, user_id, created_at, model_name, status, raw_json, first_captured_at, updated_at, ${promotedNames.join(', ')})
+  VALUES (${Array(9 + promotedNames.length).fill('?').join(', ')})`);
+const update = db.prepare(`UPDATE songs SET title=?, user_id=?, created_at=?, model_name=?, status=?,
+  raw_json=?, updated_at=?, ${promotedNames.map(name => `${name}=?`).join(', ')} WHERE id=?`);
+const upsertPersona = preparePersonaUpsert(db);
 let remixSources = null;
 function remixReferences(clip) {
   const refs = new Set();
@@ -250,10 +238,12 @@ function ingest(clips) {
       const raw = canonical(clip);
       const existing = getSong.get(clip.id);
       const fields = [text(clip.title), text(clip.user_id), text(clip.created_at), text(clip.model_name), text(clip.status)];
-      if (!existing) { insert.run(clip.id, ...fields, raw, now, now); counts.inserted++; }
-      else if (existing.raw_json === raw) counts.unchanged++;
-      else { update.run(...fields, raw, now, clip.id); counts.updated++; }
-      if (cache && isOwned && (!existing || existing.raw_json !== raw)) replaceReferences(cache, clip.id, remixReferences(clip));
+      if (existing?.raw_json === raw) { counts.unchanged++; continue; }
+      const { fields: promoted, personaFields } = extractClip(clip);
+      if (!existing) { insert.run(clip.id, ...fields, raw, now, now, ...promoted); counts.inserted++; }
+      else { update.run(...fields, raw, now, ...promoted, clip.id); counts.updated++; }
+      if (personaFields) upsertPersona.run(...personaFields, now);
+      if (cache && isOwned) replaceReferences(cache, clip.id, remixReferences(clip));
     }
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); remixSources = null; throw error; }
