@@ -92,6 +92,8 @@ h4 { font-size: .8rem; font-weight: 500; color: var(--muted); margin-bottom: 10p
 .copy-song-id { flex: none; display: inline-grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--divider); border-radius: 6px; background: #292b2e; color: var(--accent); cursor: pointer; }
 .copy-song-id:hover { background: #303641; }
 .detail-created { margin-top: 10px; font-size: .8rem; font-variant-numeric: tabular-nums; }
+.detail-engagement { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.detail-engagement strong { color: #ececee; font-weight: 600; }
 .detail-badges { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 .detail-badge { border: 1px solid #58657b; border-radius: 4px; color: #d0ddfa; padding: 3px 8px; font-size: .75rem; line-height: 1.4; }
 .detail-columns { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(220px, 1fr); gap: 30px; min-width: 0; }

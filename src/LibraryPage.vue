@@ -237,6 +237,10 @@ const fields = computed(() => detail.value ? flatten(detail.value.clip) : [])
 const lyrics = computed(() => fields.value.filter(field => /^(lyrics|full_lyrics|display_lyrics|prompt)$/i.test(field.key) && typeof field.value === 'string'))
 const clip = computed(() => detail.value?.clip ?? {})
 const metadata = computed(() => clip.value.metadata ?? {})
+const countFormatter = new Intl.NumberFormat()
+const plays = computed(() => clip.value.play_count ?? clip.value.reaction?.play_count)
+const likes = computed(() => clip.value.upvote_count)
+const hasCount = value => typeof value === 'number' && Number.isFinite(value)
 const known = value => value !== null && value !== undefined && value !== ''
 const flags = computed(() => [
   metadata.value.is_remix === true || metadata.value.is_remix === 1 || clip.value.is_remix === true || clip.value.is_remix === 1 ? 'Remix' : null,
@@ -343,6 +347,10 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
           </div>
           <template v-if="detail">
             <p class="detail-created muted">Created {{ date(clip.created_at) }}</p>
+            <div v-if="hasCount(plays) || hasCount(likes)" class="detail-engagement" aria-label="Song engagement">
+              <span v-if="hasCount(plays)"><strong>{{ countFormatter.format(plays) }}</strong> {{ plays === 1 ? 'play' : 'plays' }}</span>
+              <span v-if="hasCount(likes)"><strong>{{ countFormatter.format(likes) }}</strong> {{ likes === 1 ? 'like' : 'likes' }}</span>
+            </div>
             <div v-if="flags.length" class="detail-badges" aria-label="Song attributes"><span v-for="flag in flags" :key="flag" class="detail-badge">{{ flag }}</span></div>
           </template>
         </header>
