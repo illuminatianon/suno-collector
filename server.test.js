@@ -105,6 +105,39 @@ import { fileURLToPath } from 'node:url';
       assert.equal((await get('/api/library?' + query)).status, 400);
     }
   });
+  await t.test('detail resolves the persisted merged persona for referencing songs without changing captured clips', async () => {
+    const personaId = 'fca4108a-77da-4b54-941a-a65bf470d369';
+    const source = { id: 'persona-source', persona: {
+      id: personaId.toUpperCase(), name: 'Night Voice', persona_type: 'artist',
+      root_clip_id: 'original-clip', is_owned: true, is_public: false,
+    } };
+    const update = { id: 'persona-update', persona: { id: personaId, user_handle: '@nightvoice', image_s3_id: 'image-123' } };
+    const reference = { id: 'persona-reference', metadata: { persona_id: personaId.toUpperCase(), prompt: 'Unchanged lyric' } };
+    const absent = { id: 'persona-absent', metadata: { persona_id: 'b2a00e12-d2dc-4b91-bcee-97ad8d310ba4' } };
+    assert.equal((await (await post([source, update, reference, absent])).json()).inserted, 4);
+    const getDetail = async id => {
+      const response = await fetch(base + '/api/library/' + id, { headers: settingsHeaders });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const expectedPersona = {
+      id: personaId, name: 'Night Voice', persona_type: 'artist', root_clip_id: 'original-clip',
+      image_s3_id: 'image-123', user_handle: '@nightvoice', is_owned: 1, is_public: 0,
+      updated_at: readDb.prepare('SELECT updated_at FROM personas WHERE id=?').get(personaId).updated_at,
+    };
+    assert.deepEqual((await getDetail('persona-source')).persona, expectedPersona);
+    const referenced = await getDetail('persona-reference');
+    assert.deepEqual(referenced.persona, expectedPersona);
+    assert.deepEqual(referenced.clip, reference);
+    assert.deepEqual(JSON.parse(readDb.prepare('SELECT raw_json FROM songs WHERE id=?').get(reference.id).raw_json), reference);
+    assert.deepEqual((await getDetail('persona-absent')).clip, absent);
+    assert.equal((await getDetail('persona-absent')).persona, null);
+    // A legacy/unpromoted row can still use the captured persona ID.
+    readDb.prepare('UPDATE songs SET persona_id=NULL WHERE id=?').run(source.id);
+    const unpromoted = await getDetail(source.id);
+    assert.deepEqual(unpromoted.clip, source);
+    assert.deepEqual(unpromoted.persona, expectedPersona);
+  });
   await t.test('settings reject invalid policies atomically and both authorized tokens can edit', async () => {
     const owner = 'A1801DAD-940B-4C9D-8F0B-215C74F9AA10';
     const original = { user_id: null, ingest_mode: 'all', time_zone: 'America/Detroit' };

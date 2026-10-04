@@ -154,7 +154,8 @@ const libraryRows = db.prepare(`
   FROM songs WHERE ${libraryWhere}
   ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
 `);
-const librarySong = db.prepare('SELECT raw_json, first_captured_at, updated_at FROM songs WHERE id=?');
+const librarySong = db.prepare('SELECT raw_json, persona_id, first_captured_at, updated_at FROM songs WHERE id=?');
+const libraryPersona = db.prepare('SELECT * FROM personas WHERE id=?');
 const base = `http://127.0.0.1:${port}`;
 const getSong = db.prepare('SELECT raw_json FROM songs WHERE id=?');
 const ownedRemixes = db.prepare('SELECT id, raw_json FROM songs WHERE lower(trim(user_id))=?');
@@ -372,7 +373,12 @@ const server = http.createServer(async (req, res) => {
       catch { return send(res, 400, { error: 'Invalid song id' }); }
       const row = librarySong.get(id);
       if (!row) return send(res, 404, { error: 'Song not found' });
-      return send(res, 200, { clip: JSON.parse(row.raw_json), first_captured_at: row.first_captured_at, updated_at: row.updated_at });
+      const clip = JSON.parse(row.raw_json);
+      const personaId = normalizedId(row.persona_id) ?? normalizedId(clip.persona?.id);
+      return send(res, 200, {
+        clip, first_captured_at: row.first_captured_at, updated_at: row.updated_at,
+        persona: personaId ? libraryPersona.get(personaId) ?? null : null,
+      });
     }
     const isQuery = req.method === 'POST' && url.pathname === '/api/query';
     const isSettings = req.method === 'PUT' && url.pathname === '/api/settings';

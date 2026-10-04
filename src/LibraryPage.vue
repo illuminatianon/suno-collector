@@ -27,6 +27,20 @@ const detailLoading = ref(false)
 const detailError = ref('')
 const mobileDetail = ref(false)
 const detailHeading = ref(null)
+const copyFeedback = ref('')
+let copySequence = 0
+async function copySongId() {
+  const id = selectedId.value
+  if (!id) return
+  const sequence = ++copySequence
+  try {
+    await navigator.clipboard.writeText(id)
+    if (sequence === copySequence && selectedId.value === id) copyFeedback.value = 'Song UUID copied.'
+  } catch {
+    if (sequence === copySequence && selectedId.value === id) copyFeedback.value = 'Could not copy song UUID. Select the UUID text to copy it.'
+  }
+}
+watch(selectedId, () => { ++copySequence; copyFeedback.value = '' })
 const listHeading = ref(null)
 const view = ref('songs')
 const selectedDay = ref(null)
@@ -207,6 +221,32 @@ function flatten(value, parts = [], result = []) {
 }
 const fields = computed(() => detail.value ? flatten(detail.value.clip) : [])
 const lyrics = computed(() => fields.value.filter(field => /^(lyrics|full_lyrics|display_lyrics|prompt)$/i.test(field.key) && typeof field.value === 'string'))
+const clip = computed(() => detail.value?.clip ?? {})
+const metadata = computed(() => clip.value.metadata ?? {})
+const known = value => value !== null && value !== undefined && value !== ''
+const flags = computed(() => [
+  metadata.value.is_remix === true || metadata.value.is_remix === 1 || clip.value.is_remix === true || clip.value.is_remix === 1 ? 'Remix' : null,
+  clip.value.is_public === true || clip.value.is_public === 1 ? 'Public' : clip.value.is_public === false || clip.value.is_public === 0 ? 'Private' : null,
+  clip.value.explicit === true || clip.value.explicit === 1 || clip.value.is_explicit === true || clip.value.is_explicit === 1 ? 'Explicit' : null,
+].filter(Boolean))
+const positiveTags = computed(() => metadata.value.tags ?? clip.value.tags)
+const negativeTags = computed(() => metadata.value.negative_tags)
+const persona = computed(() => detail.value?.persona ?? clip.value.persona ?? null)
+const personaId = computed(() => persona.value?.id ?? clip.value.persona_id ?? metadata.value.persona_id)
+const personaFields = computed(() => {
+  const value = persona.value
+  if (!value) return []
+  return [
+    ['Name', value.name],
+    ['Type', value.persona_type],
+    ['Handle', value.user_handle],
+    ['UUID', value.id],
+    ['Root clip ID', value.root_clip_id],
+    ['Owned', value.is_owned === undefined || value.is_owned === null ? null : value.is_owned === true || value.is_owned === 1 ? 'Yes' : 'No'],
+    ['Public', value.is_public === undefined || value.is_public === null ? null : value.is_public === true || value.is_public === 1 ? 'Yes' : 'No'],
+    ['Image ID', value.image_s3_id],
+  ].filter(([, entry]) => known(entry))
+})
 const groups = computed(() => {
   const definitions = [
     ['Styles', /tag|style|negative|genre/i],
@@ -277,8 +317,20 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
       <main class="detail-panel" aria-label="Selected song" :aria-busy="detailLoading">
         <header class="detail-header">
           <v-btn class="back-button" @click="backToList">Back to songs</v-btn>
-          <h2 ref="detailHeading" tabindex="-1">{{ selectedId ? title : 'Song details' }}</h2>
-          <p v-if="selectedId" class="song-id muted">{{ selectedId }}</p>
+          <div class="detail-title-line">
+            <h2 ref="detailHeading" tabindex="-1">{{ selectedId ? title : 'Song details' }}</h2>
+            <button v-if="selectedId" type="button" class="copy-song-id" aria-label="Copy song UUID" title="Copy song UUID" @click="copySongId">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+            </button>
+          </div>
+          <div class="song-identifier">
+            <p v-if="selectedId" class="song-id muted">{{ selectedId }}</p>
+            <span class="copy-feedback" :class="{ error: copyFeedback.startsWith('Could not') }" role="status" aria-live="polite">{{ copyFeedback }}</span>
+          </div>
+          <template v-if="detail">
+            <p class="detail-created muted">Created {{ date(clip.created_at) }}</p>
+            <div v-if="flags.length" class="detail-badges" aria-label="Song attributes"><span v-for="flag in flags" :key="flag" class="detail-badge">{{ flag }}</span></div>
+          </template>
         </header>
         <div class="detail-scroll">
           <v-progress-linear v-if="detailLoading" indeterminate color="primary" aria-label="Loading song details" />
@@ -289,31 +341,60 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
           </div>
           <p v-else-if="!detail" class="state muted">Select a song to read its lyrics and captured metadata.</p>
           <template v-else>
-            <section class="detail-section" aria-labelledby="lyrics-heading">
-              <h3 id="lyrics-heading">Lyrics & prompt</h3>
-              <template v-if="lyrics.length">
-                <div v-for="field in lyrics" :key="field.path" class="lyric-block">
-                  <h4>{{ field.path }}</h4>
-                  <p class="lyrics">{{ field.value || 'No text captured in this field.' }}</p>
-                </div>
-              </template>
-              <p v-else class="muted">No lyrics or prompt were captured for this song.</p>
-            </section>
-            <section v-for="group in groups" :key="group.title" class="detail-section">
-              <h3>{{ group.title }}</h3>
-              <dl class="metadata-grid">
-                <template v-for="field in group.fields" :key="field.path">
-                  <dt>{{ field.path }}</dt>
-                  <dd><MetadataValue :value="field.value" /></dd>
+            <div class="detail-columns">
+              <section class="detail-section lyric-section" aria-labelledby="lyrics-heading">
+                <h3 id="lyrics-heading">Lyrics & prompt</h3>
+                <template v-if="lyrics.length">
+                  <div v-for="field in lyrics" :key="field.path" class="lyric-block">
+                    <h4>{{ field.path }}</h4>
+                    <p class="lyrics">{{ field.value || 'No text captured in this field.' }}</p>
+                  </div>
                 </template>
-              </dl>
-            </section>
-            <section class="detail-section">
-              <h3>Capture history</h3>
-              <dl class="metadata-grid">
-                <dt>First captured</dt><dd>{{ date(detail.first_captured_at) }}</dd>
-                <dt>Last updated</dt><dd>{{ date(detail.updated_at) }}</dd>
-              </dl>
+                <p v-else class="muted">No lyrics or prompt were captured for this song.</p>
+              </section>
+              <aside class="detail-sidebar" aria-label="Song tags and persona">
+                <section class="detail-section">
+                  <h3>Tags</h3>
+                  <h4>Positive tags</h4>
+                  <p class="tag-text" :class="{ muted: !known(positiveTags) }">{{ known(positiveTags) ? positiveTags : 'No positive tags captured.' }}</p>
+                  <h4>Negative tags</h4>
+                  <p class="tag-text" :class="{ muted: !known(negativeTags) }">{{ known(negativeTags) ? negativeTags : 'No negative tags captured.' }}</p>
+                </section>
+                <section class="detail-section">
+                  <h3>Persona</h3>
+                  <dl v-if="personaFields.length" class="persona-grid">
+                    <template v-for="[label, value] in personaFields" :key="label">
+                      <dt>{{ label }}</dt><dd>{{ value }}</dd>
+                    </template>
+                  </dl>
+                  <template v-else-if="known(personaId)">
+                    <p class="persona-identifier">{{ personaId }}</p>
+                    <p class="muted">No persona details captured.</p>
+                  </template>
+                  <p v-else class="muted">No persona captured for this song.</p>
+                </section>
+              </aside>
+            </div>
+            <section class="detail-section more-metadata">
+              <details>
+                <summary>More metadata</summary>
+                <div v-for="group in groups" :key="group.title" class="metadata-group">
+                  <h3>{{ group.title }}</h3>
+                  <dl class="metadata-grid">
+                    <template v-for="field in group.fields" :key="field.path">
+                      <dt>{{ field.path }}</dt>
+                      <dd><MetadataValue :value="field.value" /></dd>
+                    </template>
+                  </dl>
+                </div>
+                <div class="metadata-group">
+                  <h3>Capture history</h3>
+                  <dl class="metadata-grid">
+                    <dt>First captured</dt><dd>{{ date(detail.first_captured_at) }}</dd>
+                    <dt>Last updated</dt><dd>{{ date(detail.updated_at) }}</dd>
+                  </dl>
+                </div>
+              </details>
             </section>
             <section class="detail-section raw-section">
               <details>
