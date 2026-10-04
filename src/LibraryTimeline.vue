@@ -14,7 +14,7 @@ const yearFormatter = new Intl.DateTimeFormat('en', { timeZone: props.timeZone, 
 const currentYear = Number(yearFormatter.format(new Date()))
 const firstYear = computed(() => Number(props.timeline.first_date?.slice(0, 4)) || currentYear)
 const lastYear = computed(() => Number(props.timeline.last_date?.slice(0, 4)) || currentYear)
-const counts = computed(() => new Map(props.timeline.days.map(day => [day.date, day.count])))
+const daySummaries = computed(() => new Map(props.timeline.days.map(day => [day.date, day])))
 const maximum = computed(() => Math.max(1, ...props.timeline.days.filter(day => day.date.startsWith(`${props.year}-`)).map(day => day.count)))
 const calendar = computed(() => {
   // Grid coordinates represent calendar labels; UTC arithmetic avoids browser timezone/DST shifts.
@@ -31,16 +31,19 @@ const calendar = computed(() => {
     const key = date.toISOString().slice(0, 10)
     const column = Math.floor((offset + index) / 7) + 1
     const row = (offset + index) % 7 + 1
-    const count = counts.value.get(key) || 0
-    days.push({ date: key, count, column, row, level: count ? Math.min(4, Math.ceil(count / maximum.value * 4)) : 0 })
+    const summary = daySummaries.value.get(key)
+    const count = summary?.count || 0
+    const publicCount = summary?.public_count || 0
+    days.push({ date: key, count, publicCount, column, row, level: count ? Math.min(4, Math.ceil(count / maximum.value * 4)) : 0 })
     if (date.getUTCDate() === 1) months.push({ label: date.toLocaleString('en', { month: 'short', timeZone: 'UTC' }), column })
   }
   return { days, months, columns: days.at(-1).column }
 })
-const selectedCount = computed(() => counts.value.get(props.selectedDay) || 0)
+const selectedCount = computed(() => daySummaries.value.get(props.selectedDay)?.count || 0)
 const datedTotal = computed(() => props.timeline.days.reduce((total, day) => total + day.count, 0))
 function label(day) {
-  return `${day.date} ${props.timeZone}: ${day.count.toLocaleString()} ${day.count === 1 ? 'song' : 'songs'}`
+  const releases = day.publicCount ? ` · ${day.publicCount.toLocaleString()} public ${day.publicCount === 1 ? 'song' : 'songs'}` : ''
+  return `${day.date} ${props.timeZone}: ${day.count.toLocaleString()} ${day.count === 1 ? 'song' : 'songs'}${releases}`
 }
 </script>
 
@@ -75,13 +78,18 @@ function label(day) {
           </div>
           <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Wed</span><span>Fri</span></div>
           <div class="calendar-days">
-            <button v-for="day in calendar.days" :key="day.date" type="button" class="calendar-day" :class="[`level-${day.level}`, { 'selected-day': selectedDay === day.date }]" :style="{ gridColumn: day.column, gridRow: day.row }" :title="label(day)" :aria-label="label(day)" :aria-pressed="selectedDay === day.date" :disabled="loading" @click="emit('select', day.date)" />
+            <button v-for="day in calendar.days" :key="day.date" type="button" class="calendar-day" :class="[`level-${day.level}`, { 'selected-day': selectedDay === day.date }]" :style="{ gridColumn: day.column, gridRow: day.row }" :title="label(day)" :aria-label="label(day)" :aria-pressed="selectedDay === day.date" :disabled="loading" @click="emit('select', day.date)">
+              <svg v-if="day.publicCount" class="release-star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8-6.2-3.2L5.8 21 7 14.2 2 9.3l6.9-1z" /></svg>
+            </button>
           </div>
         </div>
       </div>
       <div class="timeline-bottom">
         <p class="timeline-summary" aria-live="polite">{{ selectedDay ? `${selectedDay} ${timeZone} · ${selectedCount.toLocaleString()} songs captured` : 'Select a day to filter the song list.' }} <v-btn v-if="selectedDay" size="small" @click="emit('clear')">Clear date filter</v-btn></p>
-        <div class="calendar-legend muted" aria-label="Color intensity indicates fewer to more songs"><span>Less</span><span v-for="level in 5" :key="level" class="calendar-swatch" :class="`level-${level - 1}`" /><span>More</span></div>
+        <div class="calendar-legends">
+          <div class="calendar-legend muted" aria-label="Color intensity indicates fewer to more songs"><span>Less</span><span v-for="level in 5" :key="level" class="calendar-swatch" :class="`level-${level - 1}`" /><span>More</span></div>
+          <div class="calendar-legend muted"><svg class="release-star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8-6.2-3.2L5.8 21 7 14.2 2 9.3l6.9-1z" /></svg><span>Public song</span></div>
+        </div>
       </div>
     </template>
   </section>

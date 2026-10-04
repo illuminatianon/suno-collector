@@ -317,32 +317,32 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
   });
 
   const clips = [
-    { id: 'year-before', title: 'Year end', created_at: '2024-01-01T04:59:59Z' },
-    { id: 'year-after', title: 'Year start', created_at: '2024-01-01T05:00:00Z' },
-    { id: 'offset-back', title: 'Detroit previous year', created_at: '2024-01-01T04:30:00+01:00' },
+    { id: 'year-before', title: 'Year end', created_at: '2024-01-01T04:59:59Z', is_public: true },
+    { id: 'year-after', title: 'Year start', created_at: '2024-01-01T05:00:00Z', is_public: false },
+    { id: 'offset-back', title: 'Detroit previous year', created_at: '2024-01-01T04:30:00+01:00', is_public: false },
     { id: 'leap-before', title: 'Pulse', created_at: '2024-02-29T04:59:59.999Z' },
-    { id: 'leap-start', title: 'Pulse', created_at: '2024-02-29T05:00:00Z' },
-    { id: 'leap-late', title: 'Pulse', created_at: '2024-03-01T04:59:59.999Z' },
-    { id: 'offset-forward', title: 'Detroit following day', created_at: '2024-02-29T23:30:00-06:00' },
-    { id: 'march-start', title: 'March', created_at: '2024-03-01T05:00:00Z' },
-    { id: 'null-date', title: 'Unknown', created_at: null },
+    { id: 'leap-start', title: 'Pulse', created_at: '2024-02-29T05:00:00Z', is_public: true },
+    { id: 'leap-late', title: 'Pulse', created_at: '2024-03-01T04:59:59.999Z', is_public: 1 },
+    { id: 'offset-forward', title: 'Detroit following day', created_at: '2024-02-29T23:30:00-06:00', is_public: 0 },
+    { id: 'march-start', title: 'March', created_at: '2024-03-01T05:00:00Z', is_public: 'true' },
+    { id: 'null-date', title: 'Unknown', created_at: null, is_public: true },
     { id: 'missing-date', title: 'Unknown' },
-    { id: 'malformed-date', title: 'Unknown', created_at: 'not-a-timestamp' },
+    { id: 'malformed-date', title: 'Unknown', created_at: 'not-a-timestamp', is_public: true },
     { id: 'invalid-date', title: 'Unknown', created_at: '2024-02-30T00:00:00Z' },
   ];
   const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips }) });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).inserted, clips.length);
 
-  await t.test('aggregation returns ordered Detroit dates independently of server timezone', async () => {
+  await t.test('aggregation returns ordered Detroit dates and counts only public songs independently of server timezone', async () => {
     const timeline = await (await get('/api/library/timeline')).json();
     assert.deepEqual(timeline, {
       days: [
-        { date: '2023-12-31', count: 2 },
-        { date: '2024-01-01', count: 1 },
-        { date: '2024-02-28', count: 1 },
-        { date: '2024-02-29', count: 2 },
-        { date: '2024-03-01', count: 2 },
+        { date: '2023-12-31', count: 2, public_count: 1 },
+        { date: '2024-01-01', count: 1, public_count: 0 },
+        { date: '2024-02-28', count: 1, public_count: 0 },
+        { date: '2024-02-29', count: 2, public_count: 2 },
+        { date: '2024-03-01', count: 2, public_count: 0 },
       ],
       first_date: '2023-12-31',
       last_date: '2024-03-01',
@@ -353,12 +353,34 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
       next.setUTCDate(next.getUTCDate() + 1);
       const page = await library(`from=${day.date}&to=${next.toISOString().slice(0, 10)}`);
       assert.equal(page.total, day.count);
+      const publicPage = await library(`from=${day.date}&to=${next.toISOString().slice(0, 10)}&visibility=public`);
+      assert.equal(publicPage.total, day.public_count);
       assert.equal(page.total_songs, 12);
     }
     const yearEnd = await library('from=2023-12-31&to=2024-01-01');
     assert.deepEqual(yearEnd.songs.map(song => song.id).sort(), ['offset-back', 'year-before']);
     const march = await library('from=2024-03-01&to=2024-03-02');
     assert.deepEqual(march.songs.map(song => song.id).sort(), ['march-start', 'offset-forward']);
+  });
+
+  await t.test('recaptured visibility updates public counts without changing day totals', async () => {
+    const before = await (await get('/api/library/timeline')).json();
+    const leapStart = clips.find(clip => clip.id === 'leap-start');
+    const leapLate = clips.find(clip => clip.id === 'leap-late');
+    const yearStart = clips.find(clip => clip.id === 'year-after');
+    const recapture = async changed => {
+      const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips: changed }) });
+      assert.equal(response.status, 200);
+      return (await (await get('/api/library/timeline')).json());
+    };
+    const oneLeft = await recapture([{ ...leapStart, is_public: false }]);
+    assert.equal(oneLeft.days.find(day => day.date === '2024-02-29').public_count, 1);
+    const changed = await recapture([{ ...leapLate, is_public: false }, { ...yearStart, is_public: true }]);
+    assert.equal(changed.days.find(day => day.date === '2024-02-29').public_count, 0);
+    assert.equal(changed.days.find(day => day.date === '2024-01-01').public_count, 1);
+    assert.equal(changed.total, before.total);
+    assert.deepEqual(changed.days.map(({ date, count }) => ({ date, count })), before.days.map(({ date, count }) => ({ date, count })));
+    assert.deepEqual(await recapture([leapStart, leapLate, yearStart]), before);
   });
 
   await t.test('optional boundaries exclude unknown dates only when filtering', async () => {
@@ -406,13 +428,13 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
       { id: 'spring-before', created_at: '2024-03-10T04:59:59.999Z' },
       { id: 'spring-start', created_at: '2024-03-10T05:00:00Z' },
       { id: 'spring-gap-before', created_at: '2024-03-10T06:59:59.999Z' },
-      { id: 'spring-gap-after', created_at: '2024-03-10T07:00:00Z' },
+      { id: 'spring-gap-after', created_at: '2024-03-10T07:00:00Z', is_public: true },
       { id: 'spring-last', created_at: '2024-03-11T03:59:59.999Z' },
       { id: 'spring-next', created_at: '2024-03-11T04:00:00Z' },
       { id: 'fall-before', created_at: '2024-11-03T03:59:59.999Z' },
       { id: 'fall-start', created_at: '2024-11-03T04:00:00Z' },
       { id: 'fall-hour-first', created_at: '2024-11-03T05:30:00Z' },
-      { id: 'fall-hour-second', created_at: '2024-11-03T06:30:00Z' },
+      { id: 'fall-hour-second', created_at: '2024-11-03T06:30:00Z', is_public: true },
       { id: 'fall-last', created_at: '2024-11-04T04:59:59.999Z' },
       { id: 'fall-next', created_at: '2024-11-04T05:00:00Z' },
     ];
@@ -430,7 +452,9 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
     for (const [from, to, ids] of cases) {
       const page = await library(`from=${from}&to=${to}`);
       assert.deepEqual(page.songs.map(song => song.id).sort(), ids, from);
-      assert.equal(timeline.days.find(day => day.date === from).count, ids.length, from);
+      const day = timeline.days.find(day => day.date === from);
+      assert.equal(day.count, ids.length, from);
+      assert.equal(day.public_count, samples.filter(clip => ids.includes(clip.id) && clip.is_public).length, from);
     }
     assert.equal(timeline.total, clips.length + samples.length);
   });
@@ -648,7 +672,7 @@ test('runtime timezone configuration controls API dates and fails before databas
         assert.equal((await fetch(base + '/api/config', { headers })).status, 401);
       }
       const clips = [
-        { id: 'before-midnight', created_at: '2024-03-10T07:59:59Z' },
+        { id: 'before-midnight', created_at: '2024-03-10T07:59:59Z', is_public: true },
         { id: 'after-midnight', created_at: '2024-03-10T08:00:00Z' },
         { id: 'after-dst', created_at: '2024-03-11T07:00:00Z' },
         { id: 'undated' },
@@ -656,8 +680,8 @@ test('runtime timezone configuration controls API dates and fails before databas
       const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips }) });
       assert.equal(response.status, 200);
       const days = zone === 'UTC'
-        ? [{ date: '2024-03-10', count: 2 }, { date: '2024-03-11', count: 1 }]
-        : [{ date: '2024-03-09', count: 1 }, { date: '2024-03-10', count: 1 }, { date: '2024-03-11', count: 1 }];
+        ? [{ date: '2024-03-10', count: 2, public_count: 1 }, { date: '2024-03-11', count: 1, public_count: 0 }]
+        : [{ date: '2024-03-09', count: 1, public_count: 1 }, { date: '2024-03-10', count: 1, public_count: 0 }, { date: '2024-03-11', count: 1, public_count: 0 }];
       assert.deepEqual(await (await get('/api/library/timeline')).json(), {
         days, first_date: days[0].date, last_date: days.at(-1).date, total: 4,
       });
@@ -680,8 +704,8 @@ test('runtime timezone configuration controls API dates and fails before databas
       assert.deepEqual(await updated.json(), { user_id: null, ingest_mode: 'all', time_zone: nextZone });
       assert.deepEqual(await (await get('/api/config')).json(), { time_zone: nextZone });
       const nextDays = nextZone === 'UTC'
-        ? [{ date: '2024-03-10', count: 2 }, { date: '2024-03-11', count: 1 }]
-        : [{ date: '2024-03-09', count: 1 }, { date: '2024-03-10', count: 1 }, { date: '2024-03-11', count: 1 }];
+        ? [{ date: '2024-03-10', count: 2, public_count: 1 }, { date: '2024-03-11', count: 1, public_count: 0 }]
+        : [{ date: '2024-03-09', count: 1, public_count: 1 }, { date: '2024-03-10', count: 1, public_count: 0 }, { date: '2024-03-11', count: 1, public_count: 0 }];
       assert.deepEqual((await (await get('/api/library/timeline')).json()).days, nextDays);
       const nextSql = await fetch(base + '/api/query', { method: 'POST', headers: readHeaders,
         body: JSON.stringify({ sql: 'SELECT local_date(created_at) AS day, count(*) AS n FROM songs WHERE created_at IS NOT NULL GROUP BY day ORDER BY day' }) });

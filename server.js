@@ -31,7 +31,7 @@ Open /settings to set a Suno User ID and capture mode before first ingest.
 Default Owned blocks delivery with HTTP 409 until an ID is saved; the extension retains the batch.
 Remixed also keeps known outside source clips referenced by your owned remixes; All keeps every delivered clip.
 The ingest policy applies to future deliveries only; skipped clips must be recaptured if needed later.
-GET /api/library/timeline returns configured local day counts, first_date, last_date, and total (including undated songs).
+GET /api/library/timeline returns configured local day counts/public_count, first_date, last_date, and total (including undated songs).
 Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in the saved time zone; either is optional.
 Date boundaries must be real calendar dates with from < to; dated queries omit unparseable/undated songs.
 Then reload Suno once and browse Library manually. The adapter does not scroll or request songs.
@@ -172,8 +172,8 @@ const libraryWhere = `(
 const libraryCount = db.prepare(`SELECT count(*) AS n FROM songs WHERE ${libraryWhere}`);
 const totalCount = db.prepare('SELECT count(*) AS n FROM songs');
 const timelineDays = db.prepare(`
-  WITH dated AS MATERIALIZED (SELECT ${songDate} AS day FROM songs)
-  SELECT day AS date, count(*) AS count
+  WITH dated AS MATERIALIZED (SELECT ${songDate} AS day, is_public FROM songs)
+  SELECT day AS date, count(*) AS count, sum(CASE WHEN is_public = 1 THEN 1 ELSE 0 END) AS public_count
   FROM dated WHERE day IS NOT NULL
   GROUP BY day ORDER BY day ASC
 `);
