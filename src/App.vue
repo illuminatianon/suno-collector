@@ -3,6 +3,13 @@ import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import MetadataValue from './MetadataValue.vue'
 import LibraryTimeline from './LibraryTimeline.vue'
 
+const timestampFormatter = new Intl.DateTimeFormat(undefined, {
+  timeZone: 'America/Detroit', year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+})
+const yearFormatter = new Intl.DateTimeFormat('en', { timeZone: 'America/Detroit', year: 'numeric' })
+const currentYear = () => Number(yearFormatter.format(new Date()))
+
 const songs = ref([])
 const total = ref(0)
 const inventory = ref(null)
@@ -19,7 +26,7 @@ const listHeading = ref(null)
 const view = ref('songs')
 const selectedDay = ref(null)
 const timeline = ref({ days: [], first_date: null, last_date: null, total: 0 })
-const timelineYear = ref(new Date().getUTCFullYear())
+const timelineYear = ref(currentYear())
 const timelineLoading = ref(false)
 const timelineError = ref('')
 let timelineController = null
@@ -69,6 +76,7 @@ async function loadSongs(append = false) {
     const params = new URLSearchParams({ limit: '100', offset: String(offset), q: query.value })
     if (selectedDay.value) {
       const next = new Date(`${selectedDay.value}T00:00:00Z`)
+      // Advance a calendar label, not a Detroit instant: DST must not change the next date.
       next.setUTCDate(next.getUTCDate() + 1)
       params.set('from', selectedDay.value)
       params.set('to', next.toISOString().slice(0, 10))
@@ -142,7 +150,7 @@ async function loadTimeline() {
     const data = await api('/api/library/timeline', timelineController.signal)
     if (sequence !== timelineSequence) return
     timeline.value = data
-    const current = new Date().getUTCFullYear()
+    const current = currentYear()
     const first = Number(data.first_date?.slice(0, 4)) || current
     const last = Number(data.last_date?.slice(0, 4)) || current
     timelineYear.value = timelineInitialized ? Math.max(first, Math.min(last, timelineYear.value)) : last
@@ -203,7 +211,7 @@ onBeforeUnmount(() => {
 function date(value) {
   if (!value) return 'Date unknown'
   const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString()
+  return Number.isNaN(parsed.getTime()) ? String(value) : timestampFormatter.format(parsed)
 }
 function duration(value) {
   if (value === null || value === undefined || value === '') return null
@@ -259,7 +267,7 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             <v-btn size="small" :aria-pressed="view === 'songs'" :class="{ 'active-view': view === 'songs' }" @click="view = 'songs'">Songs</v-btn>
             <v-btn size="small" :aria-pressed="view === 'timeline'" :class="{ 'active-view': view === 'timeline' }" @click="view = 'timeline'">Timeline</v-btn>
           </div>
-          <p v-if="selectedDay" class="date-filter">Date: {{ selectedDay }} UTC <v-btn size="small" @click="selectedDay = null">Clear</v-btn></p>
+          <p v-if="selectedDay" class="date-filter">Date: {{ selectedDay }} America/Detroit <v-btn size="small" @click="selectedDay = null">Clear</v-btn></p>
           <v-text-field v-model="query" label="Search song titles" variant="outlined" density="compact" hide-details />
           <p v-if="query" class="search-count muted" aria-live="polite">{{ loading ? 'Searching…' : `${total.toLocaleString()} matching songs` }}</p>
           <v-btn v-if="query" size="small" @click="query = ''">Clear search</v-btn>
@@ -270,7 +278,7 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             <p>{{ listError }}</p>
             <v-btn @click="loadSongs()">Retry library</v-btn>
           </div>
-          <p v-if="!loading && !listError && !songs.length" class="state muted">{{ selectedDay ? (query ? 'No songs on this UTC day match your title search.' : 'No songs captured on this UTC day. Select another day or clear the date filter.') : query ? 'No songs match this title. Try another search.' : 'No songs captured yet. Browse Suno with the collector enabled, then refresh.' }}</p>
+          <p v-if="!loading && !listError && !songs.length" class="state muted">{{ selectedDay ? (query ? 'No songs on this Detroit day match your title search.' : 'No songs captured on this Detroit day. Select another day or clear the date filter.') : query ? 'No songs match this title. Try another search.' : 'No songs captured yet. Browse Suno with the collector enabled, then refresh.' }}</p>
           <ul class="song-list">
             <li v-for="song in songs" :key="song.id">
               <button class="song-row" :class="{ selected: song.id === selectedId }" :aria-current="song.id === selectedId ? 'true' : undefined" @click="selectSong(song.id)">

@@ -97,14 +97,14 @@ import { DatabaseSync } from 'node:sqlite';
   readDb.close();
 });
 
-test('UTC timeline and date-filtered library agree for an isolated archive', async t => {
+test('Detroit timeline and date-filtered library agree for an isolated archive', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'suno-timeline-test-'));
   const probe = net.createServer();
   probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const dbPath = join(directory, 'songs.sqlite');
-  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server.js'], { env: { ...process.env, TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });
   let readDb;
@@ -141,14 +141,14 @@ test('UTC timeline and date-filtered library agree for an isolated archive', asy
   });
 
   const clips = [
-    { id: 'year-before', title: 'Year end', created_at: '2023-12-31T23:59:59Z' },
-    { id: 'year-after', title: 'Year start', created_at: '2024-01-01T00:00:00Z' },
-    { id: 'offset-back', title: 'UTC previous year', created_at: '2024-01-01T00:30:00+01:00' },
-    { id: 'leap-before', title: 'Pulse', created_at: '2024-02-28T23:59:59.999Z' },
-    { id: 'leap-start', title: 'Pulse', created_at: '2024-02-29T00:00:00Z' },
-    { id: 'leap-late', title: 'Pulse', created_at: '2024-02-29T23:59:59.999Z' },
-    { id: 'offset-forward', title: 'UTC following day', created_at: '2024-02-29T23:30:00-01:00' },
-    { id: 'march-start', title: 'March', created_at: '2024-03-01T00:00:00Z' },
+    { id: 'year-before', title: 'Year end', created_at: '2024-01-01T04:59:59Z' },
+    { id: 'year-after', title: 'Year start', created_at: '2024-01-01T05:00:00Z' },
+    { id: 'offset-back', title: 'Detroit previous year', created_at: '2024-01-01T04:30:00+01:00' },
+    { id: 'leap-before', title: 'Pulse', created_at: '2024-02-29T04:59:59.999Z' },
+    { id: 'leap-start', title: 'Pulse', created_at: '2024-02-29T05:00:00Z' },
+    { id: 'leap-late', title: 'Pulse', created_at: '2024-03-01T04:59:59.999Z' },
+    { id: 'offset-forward', title: 'Detroit following day', created_at: '2024-02-29T23:30:00-06:00' },
+    { id: 'march-start', title: 'March', created_at: '2024-03-01T05:00:00Z' },
     { id: 'null-date', title: 'Unknown', created_at: null },
     { id: 'missing-date', title: 'Unknown' },
     { id: 'malformed-date', title: 'Unknown', created_at: 'not-a-timestamp' },
@@ -158,7 +158,7 @@ test('UTC timeline and date-filtered library agree for an isolated archive', asy
   assert.equal(response.status, 200);
   assert.equal((await response.json()).inserted, clips.length);
 
-  await t.test('aggregation returns only ordered UTC date counts with all-song total', async () => {
+  await t.test('aggregation returns ordered Detroit dates independently of server timezone', async () => {
     const timeline = await (await get('/api/library/timeline')).json();
     assert.deepEqual(timeline, {
       days: [
@@ -223,5 +223,39 @@ test('UTC timeline and date-filtered library agree for an isolated archive', asy
       assert.equal((await get('/api/library?' + query)).status, 400, query);
     }
     assert.equal((await library('from=2000-02-29&to=2000-03-01')).total, 0);
+  });
+
+  await t.test('Detroit midnight and 23/25-hour DST days agree across aggregation and filtering', async () => {
+    const samples = [
+      { id: 'spring-before', created_at: '2024-03-10T04:59:59.999Z' },
+      { id: 'spring-start', created_at: '2024-03-10T05:00:00Z' },
+      { id: 'spring-gap-before', created_at: '2024-03-10T06:59:59.999Z' },
+      { id: 'spring-gap-after', created_at: '2024-03-10T07:00:00Z' },
+      { id: 'spring-last', created_at: '2024-03-11T03:59:59.999Z' },
+      { id: 'spring-next', created_at: '2024-03-11T04:00:00Z' },
+      { id: 'fall-before', created_at: '2024-11-03T03:59:59.999Z' },
+      { id: 'fall-start', created_at: '2024-11-03T04:00:00Z' },
+      { id: 'fall-hour-first', created_at: '2024-11-03T05:30:00Z' },
+      { id: 'fall-hour-second', created_at: '2024-11-03T06:30:00Z' },
+      { id: 'fall-last', created_at: '2024-11-04T04:59:59.999Z' },
+      { id: 'fall-next', created_at: '2024-11-04T05:00:00Z' },
+    ];
+    const response = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips: samples }) });
+    assert.equal(response.status, 200);
+    const timeline = await (await get('/api/library/timeline')).json();
+    const cases = [
+      ['2024-03-09', '2024-03-10', ['spring-before']],
+      ['2024-03-10', '2024-03-11', ['spring-gap-after', 'spring-gap-before', 'spring-last', 'spring-start']],
+      ['2024-03-11', '2024-03-12', ['spring-next']],
+      ['2024-11-02', '2024-11-03', ['fall-before']],
+      ['2024-11-03', '2024-11-04', ['fall-hour-first', 'fall-hour-second', 'fall-last', 'fall-start']],
+      ['2024-11-04', '2024-11-05', ['fall-next']],
+    ];
+    for (const [from, to, ids] of cases) {
+      const page = await library(`from=${from}&to=${to}`);
+      assert.deepEqual(page.songs.map(song => song.id).sort(), ids, from);
+      assert.equal(timeline.days.find(day => day.date === from).count, ids.length, from);
+    }
+    assert.equal(timeline.total, clips.length + samples.length);
   });
 });

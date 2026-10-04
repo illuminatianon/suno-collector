@@ -17,8 +17,8 @@ Use Refresh to pick up newly captured songs; search matches titles and Load more
 Select a song for full lyrics and metadata; Full captured JSON exposes every field without loading remote media.
 The UI uses an independent process-local read-only token from GET /api/session.
 GET /api/library?limit=100&offset=0&q=title lists songs; GET /api/library/<id> returns all clip data.
-GET /api/library/timeline returns UTC day counts, first_date, last_date, and total (including undated songs).
-Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive; either is optional.
+GET /api/library/timeline returns America/Detroit day counts, first_date, last_date, and total (including undated songs).
+Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in America/Detroit; either is optional.
 Date boundaries must be real calendar dates with from < to; dated queries omit unparseable/undated songs.
 Then reload Suno once and browse Library manually. The adapter does not scroll or request songs.
 Console prefix: [Suno collector]. Violentmonkey menu: status, pause/resume delivery, retry.
@@ -61,19 +61,35 @@ db.prepare('INSERT OR IGNORE INTO settings VALUES (?, ?)').run('ingress_token', 
 const token = db.prepare('SELECT value FROM settings WHERE key=?').get('ingress_token').value;
 const readToken = randomBytes(32).toString('hex');
 const distPath = fileURLToPath(new URL('./dist/', import.meta.url));
-// Validate the stored calendar part before UTC conversion: SQLite normalizes dates such as February 30.
+const dayFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Detroit', year: 'numeric', month: '2-digit', day: '2-digit',
+});
+db.function('detroit_date', { deterministic: true }, timestamp => {
+  if (timestamp === null) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  let year, month, day;
+  for (const part of dayFormatter.formatToParts(date)) {
+    if (part.type === 'year') year = part.value;
+    else if (part.type === 'month') month = part.value;
+    else if (part.type === 'day') day = part.value;
+  }
+  return `${year.padStart(4, '0')}-${month}-${day}`;
+});
+// Reject impossible stored dates; normalize to UTC before the explicit Detroit conversion.
 const songDate = `CASE
   WHEN date(substr(created_at, 1, 10), '+0 days') = substr(created_at, 1, 10)
-  THEN date(created_at) END`;
+  THEN detroit_date(strftime('%Y-%m-%dT%H:%M:%fZ', created_at)) END`;
 const libraryWhere = `coalesce(title, '') LIKE ? ESCAPE '\\'
   AND (? IS NULL OR ${songDate} >= ?)
   AND (? IS NULL OR ${songDate} < ?)`;
 const libraryCount = db.prepare(`SELECT count(*) AS n FROM songs WHERE ${libraryWhere}`);
 const totalCount = db.prepare('SELECT count(*) AS n FROM songs');
 const timelineDays = db.prepare(`
-  SELECT ${songDate} AS date, count(*) AS count
-  FROM songs WHERE ${songDate} IS NOT NULL
-  GROUP BY ${songDate} ORDER BY date ASC
+  WITH dated AS MATERIALIZED (SELECT ${songDate} AS day FROM songs)
+  SELECT day AS date, count(*) AS count
+  FROM dated WHERE day IS NOT NULL
+  GROUP BY day ORDER BY day ASC
 `);
 const libraryRows = db.prepare(`
   SELECT id, title, user_id, created_at, model_name, status,

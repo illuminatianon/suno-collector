@@ -9,12 +9,13 @@ const props = defineProps({
   error: { type: String, default: '' },
 })
 const emit = defineEmits(['select', 'year', 'clear', 'retry'])
-const currentYear = new Date().getUTCFullYear()
+const currentYear = Number(new Intl.DateTimeFormat('en', { timeZone: 'America/Detroit', year: 'numeric' }).format(new Date()))
 const firstYear = computed(() => Number(props.timeline.first_date?.slice(0, 4)) || currentYear)
 const lastYear = computed(() => Number(props.timeline.last_date?.slice(0, 4)) || currentYear)
 const counts = computed(() => new Map(props.timeline.days.map(day => [day.date, day.count])))
 const maximum = computed(() => Math.max(1, ...props.timeline.days.filter(day => day.date.startsWith(`${props.year}-`)).map(day => day.count)))
 const calendar = computed(() => {
+  // Grid coordinates represent calendar labels; UTC arithmetic avoids browser timezone/DST shifts.
   const start = new Date(0)
   start.setUTCFullYear(props.year, 0, 1)
   start.setUTCHours(0, 0, 0, 0)
@@ -37,7 +38,7 @@ const calendar = computed(() => {
 const selectedCount = computed(() => counts.value.get(props.selectedDay) || 0)
 const datedTotal = computed(() => props.timeline.days.reduce((total, day) => total + day.count, 0))
 function label(day) {
-  return `${day.date} UTC: ${day.count.toLocaleString()} ${day.count === 1 ? 'song' : 'songs'}`
+  return `${day.date} America/Detroit: ${day.count.toLocaleString()} ${day.count === 1 ? 'song' : 'songs'}`
 }
 </script>
 
@@ -46,7 +47,7 @@ function label(day) {
     <div class="timeline-heading-line">
       <div>
         <h2 id="timeline-heading">Capture timeline</h2>
-        <p class="muted timeline-summary">Stored song creation dates · UTC calendar days</p>
+        <p class="muted timeline-summary">Stored song creation dates · America/Detroit calendar days</p>
       </div>
       <div class="year-controls" aria-label="Calendar year">
         <v-btn size="small" :disabled="loading || year <= firstYear" aria-label="Previous year" @click="emit('year', year - 1)">Previous</v-btn>
@@ -77,7 +78,7 @@ function label(day) {
         </div>
       </div>
       <div class="timeline-bottom">
-        <p class="timeline-summary" aria-live="polite">{{ selectedDay ? `${selectedDay} UTC · ${selectedCount.toLocaleString()} songs captured` : 'Select a day to filter the song list.' }} <v-btn v-if="selectedDay" size="small" @click="emit('clear')">Clear date filter</v-btn></p>
+        <p class="timeline-summary" aria-live="polite">{{ selectedDay ? `${selectedDay} America/Detroit · ${selectedCount.toLocaleString()} songs captured` : 'Select a day to filter the song list.' }} <v-btn v-if="selectedDay" size="small" @click="emit('clear')">Clear date filter</v-btn></p>
         <div class="calendar-legend muted" aria-label="Color intensity indicates fewer to more songs"><span>Less</span><span v-for="level in 5" :key="level" class="calendar-swatch" :class="`level-${level - 1}`" /><span>More</span></div>
       </div>
     </template>
