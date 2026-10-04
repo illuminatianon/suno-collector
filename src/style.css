@@ -72,7 +72,7 @@ h3 { font-size: 1rem; font-weight: 650; margin-bottom: 16px; }
 h4 { font-size: .8rem; font-weight: 500; color: var(--muted); margin-bottom: 10px; overflow-wrap: anywhere; }
 .muted { color: var(--muted); }
 .inventory { font-size: .85rem; margin: 6px 0 20px; font-variant-numeric: tabular-nums; }
-.search-count { font-size: .8rem; margin-top: 10px; }
+.library-result-count { flex: none; padding: 9px 20px; margin: 0; border-bottom: 1px solid var(--divider); background: #202123; font-size: .8rem; font-variant-numeric: tabular-nums; }
 .library-filter-actions { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .library-filters { min-width: 0; flex: 1; }
 .library-filters summary { display: inline-flex; align-items: center; gap: 9px; min-height: 32px; color: var(--accent); }

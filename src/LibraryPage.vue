@@ -358,8 +358,8 @@ const title = computed(() => detail.value?.clip?.title || songs.value.find(song 
             </details>
             <v-btn v-if="hasFilters" size="small" variant="text" @click="clearFilters">Clear all filters</v-btn>
           </div>
-          <p class="search-count muted" aria-live="polite">{{ loading ? 'Searching…' : `${total.toLocaleString()} ${hasFilters ? 'matching' : 'captured'} songs` }}</p>
         </header>
+        <p class="library-result-count muted" aria-live="polite">{{ loading ? 'Searching…' : `${total.toLocaleString()} ${hasFilters ? 'matching' : 'captured'} songs` }}</p>
         <div class="song-scroll" :aria-busy="loading">
           <v-progress-linear v-if="loading" indeterminate color="primary" aria-label="Loading songs" />
           <div v-if="listError" class="state error" role="alert">
