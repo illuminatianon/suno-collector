@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -257,5 +257,141 @@ test('Detroit timeline and date-filtered library agree for an isolated archive',
       assert.equal(timeline.days.find(day => day.date === from).count, ids.length, from);
     }
     assert.equal(timeline.total, clips.length + samples.length);
+  });
+});
+
+test('authenticated SQL queries return full read-only results and SQL deep links serve the UI', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'suno-query-test-'));
+  const probe = net.createServer();
+  probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  const dbPath = join(directory, 'songs.sqlite');
+  const serverPath = join(directory, 'server.mjs');
+  copyFileSync(new URL('./server.js', import.meta.url), serverPath);
+  mkdirSync(join(directory, 'dist'));
+  const index = '<!doctype html><title>Isolated library UI</title><div id="app"></div>';
+  writeFileSync(join(directory, 'dist', 'index.html'), index);
+  const child = spawn(process.execPath, [serverPath], { env: { ...process.env, TZ: 'Asia/Tokyo', PORT: String(port), SUNO_DB: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data; });
+  let readDb;
+  t.after(async () => {
+    readDb?.close();
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Server startup timeout: ' + stderr)), 10000);
+    child.stdout.on('data', data => { if (String(data).includes('Install in Violentmonkey:')) { clearTimeout(timer); resolve(); } });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`Server exited ${code}: ${stderr}`)); });
+  });
+  const base = `http://127.0.0.1:${port}`;
+  readDb = new DatabaseSync(dbPath, { readOnly: true });
+  const token = readDb.prepare("SELECT value FROM settings WHERE key='ingress_token'").get().value;
+  const ingressHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const session = await (await fetch(base + '/api/session')).json();
+  const readHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` };
+  const query = (sql, headers = readHeaders) => fetch(base + '/api/query', { method: 'POST', headers, body: JSON.stringify({ sql }) });
+
+  await t.test('exact application routes share the index without masking missing API or asset routes', async () => {
+    for (const path of ['/', '/sql']) {
+      const response = await fetch(base + path);
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-type'), /^text\/html/);
+      assert.equal(await response.text(), index);
+    }
+    for (const path of ['/sql/missing', '/api/missing', '/assets/missing.js']) {
+      const response = await fetch(base + path, { headers: ingressHeaders });
+      assert.equal(response.status, 404);
+      assert.deepEqual(await response.json(), { error: 'Not found' });
+    }
+  });
+
+  await t.test('read and ingress tokens authorize SQL but absent and incorrect tokens do not', async () => {
+    for (const headers of [{ 'Content-Type': 'application/json' }, { 'Content-Type': 'application/json', Authorization: 'Bearer incorrect' }]) {
+      assert.equal((await query('SELECT 1', headers)).status, 401);
+    }
+    for (const headers of [readHeaders, ingressHeaders]) {
+      const response = await query('SELECT 0 AS zero, 1.5 AS fraction, \'café 🎵\' AS text, NULL AS absent', headers);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { columns: ['zero', 'fraction', 'text', 'absent'], rows: [[0, 1.5, 'café 🎵', null]] });
+    }
+  });
+
+  const clips = Array.from({ length: 251 }, (_, i) => ({
+    id: `query-${String(i).padStart(3, '0')}`,
+    title: `Song ${i}`,
+    created_at: i < 125 ? '2024-03-10T04:59:59Z' : '2024-03-10T05:00:00Z',
+    metadata: { duration: i + 0.5, prompt: 'Lyrics café 🎵' },
+  }));
+  const ingested = await fetch(base + '/api/ingest', { method: 'POST', headers: ingressHeaders, body: JSON.stringify({ clips }) });
+  assert.equal(ingested.status, 200);
+  assert.equal((await ingested.json()).inserted, 251);
+
+  await t.test('all rows retain column order and duplicate column names without a hidden result cap', async () => {
+    const response = await query('SELECT id AS value, title AS value, json_extract(raw_json, \'$.metadata.duration\') AS duration, NULL AS absent FROM songs ORDER BY id');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      columns: ['value', 'value', 'duration', 'absent'],
+      rows: clips.map((clip, i) => [clip.id, clip.title, i + 0.5, null]),
+    });
+    const empty = await query('SELECT id, title FROM songs WHERE 0');
+    assert.equal(empty.status, 200);
+    assert.deepEqual(await empty.json(), { columns: ['id', 'title'], rows: [] });
+  });
+
+  await t.test('CTEs combine JSON extraction and Detroit aggregation independently of server timezone', async () => {
+    const response = await query(`-- leading comment
+      WITH dated AS (
+        SELECT detroit_date(created_at) AS day, json_extract(raw_json, '$.metadata.duration') AS duration
+        FROM songs
+      )
+      SELECT day, count(*) AS songs, sum(duration) AS duration FROM dated GROUP BY day ORDER BY day;
+      /* trailing comment */ -- another comment`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      columns: ['day', 'songs', 'duration'],
+      rows: [['2024-03-09', 125, 7812.5], ['2024-03-10', 126, 23688]],
+    });
+  });
+
+  await t.test('invalid input, invalid SQL and additional statements return helpful errors', async () => {
+    for (const sql of [undefined, null, 1, '', '  ', 'SELECT \0 1', 'SELEC title FROM songs', 'SELECT missing FROM songs', 'SELECT 1; SELECT 2', 'SELECT 1; /* comment */ DELETE FROM songs']) {
+      const response = await query(sql);
+      assert.equal(response.status, 400, String(sql));
+      assert.match((await response.json()).error, /\S/);
+    }
+    const malformed = await fetch(base + '/api/query', { method: 'POST', headers: readHeaders, body: '{' });
+    assert.equal(malformed.status, 400);
+    assert.deepEqual(await malformed.json(), { error: 'Invalid JSON' });
+    const missingTable = await query('SELECT * FROM absent_table');
+    assert.equal(missingTable.status, 400);
+    assert.match((await missingTable.json()).error, /no such table: absent_table/);
+  });
+
+  await t.test('writes cannot change stored songs or schema and later reads still work', async () => {
+    const before = readDb.prepare('SELECT * FROM songs ORDER BY id').all();
+    for (const sql of [
+      'DELETE FROM songs',
+      "UPDATE songs SET title='destroyed'",
+      'DROP TABLE songs',
+      "INSERT INTO songs SELECT 'forbidden', title, user_id, created_at, model_name, status, raw_json, first_captured_at, updated_at FROM songs LIMIT 1",
+      'PRAGMA user_version=99',
+      'BEGIN TRANSACTION',
+      "ATTACH DATABASE ':memory:' AS scratch",
+    ]) {
+      const response = await query(sql);
+      assert.equal(response.status, 400, sql);
+      assert.match((await response.json()).error, /readonly|read-only/i);
+    }
+    assert.deepEqual(readDb.prepare('SELECT * FROM songs ORDER BY id').all(), before);
+    assert.equal(readDb.prepare('PRAGMA user_version').get().user_version, 0);
+    const response = await query('SELECT count(*) AS songs FROM songs');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { columns: ['songs'], rows: [[251]] });
+    const library = await fetch(base + '/api/library?limit=1', { headers: readHeaders });
+    assert.equal(library.status, 200);
+    assert.equal((await library.json()).total, 251);
   });
 });

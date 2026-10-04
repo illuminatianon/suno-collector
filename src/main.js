@@ -4,6 +4,7 @@ import { VApp, VBtn, VTextField, VProgressLinear } from 'vuetify/components'
 import { Ripple } from 'vuetify/directives'
 import 'vuetify/styles'
 import App from './App.vue'
+import router from './router.js'
 import './style.css'
 
 const vuetify = createVuetify({
@@ -21,4 +22,4 @@ const vuetify = createVuetify({
   defaults: { VBtn: { rounded: 'sm', variant: 'text' } },
 })
 
-createApp(App).use(vuetify).mount('#app')
+createApp(App).use(vuetify).use(router).mount('#app')

@@ -16,6 +16,10 @@ UI development: keep npm start running, then npm run dev for Vite with the same 
 Use Refresh to pick up newly captured songs; search matches titles and Load more fetches 100 summaries.
 Select a song for full lyrics and metadata; Full captured JSON exposes every field without loading remote media.
 The UI uses an independent process-local read-only token from GET /api/session.
+SQL UI: open /sql to run one read-only SQLite statement and download all result rows as CSV.
+POST /api/query accepts {sql:"SELECT ..."} with the library read token or persistent ingress token.
+Results are {columns:[...],rows:[[...]]}, preserving strings, numbers, and nulls without pagination or a hidden limit.
+SELECT and CTE queries support json_extract and detroit_date(timestamp); archive writes are rejected.
 GET /api/library?limit=100&offset=0&q=title lists songs; GET /api/library/<id> returns all clip data.
 GET /api/library/timeline returns America/Detroit day counts, first_date, last_date, and total (including undated songs).
 Library from=YYYY-MM-DD is inclusive and to=YYYY-MM-DD is exclusive in America/Detroit; either is optional.
@@ -60,11 +64,12 @@ db.exec(`
 db.prepare('INSERT OR IGNORE INTO settings VALUES (?, ?)').run('ingress_token', randomBytes(32).toString('hex'));
 const token = db.prepare('SELECT value FROM settings WHERE key=?').get('ingress_token').value;
 const readToken = randomBytes(32).toString('hex');
+const queryDb = new DatabaseSync(dbPath, { readOnly: true });
 const distPath = fileURLToPath(new URL('./dist/', import.meta.url));
 const dayFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'America/Detroit', year: 'numeric', month: '2-digit', day: '2-digit',
 });
-db.function('detroit_date', { deterministic: true }, timestamp => {
+function detroitDate(timestamp) {
   if (timestamp === null) return null;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return null;
@@ -75,7 +80,10 @@ db.function('detroit_date', { deterministic: true }, timestamp => {
     else if (part.type === 'day') day = part.value;
   }
   return `${year.padStart(4, '0')}-${month}-${day}`;
-});
+}
+for (const connection of [db, queryDb]) {
+  connection.function('detroit_date', { deterministic: true }, detroitDate);
+}
 // Reject impossible stored dates; normalize to UTC before the explicit Detroit conversion.
 const songDate = `CASE
   WHEN date(substr(created_at, 1, 10), '+0 days') = substr(created_at, 1, 10)
@@ -164,7 +172,7 @@ const assetTypes = {
   '.ttf': 'font/ttf',
 };
 async function serveUi(res, pathname) {
-  const isIndex = pathname === '/';
+  const isIndex = pathname === '/' || pathname === '/sql';
   let relative;
   try { relative = isIndex ? 'index.html' : decodeURIComponent(pathname.slice(1)); }
   catch { return send(res, 400, { error: 'Invalid asset path' }); }
@@ -208,7 +216,7 @@ const server = http.createServer(async (req, res) => {
       if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site session requests are forbidden' });
       return send(res, 200, { token: readToken });
     }
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname.startsWith('/assets/'))) {
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/sql' || url.pathname.startsWith('/assets/'))) {
       return await serveUi(res, url.pathname);
     }
     if (req.method === 'GET' && (url.pathname === '/api/library' || url.pathname.startsWith('/api/library/'))) {
@@ -250,15 +258,18 @@ const server = http.createServer(async (req, res) => {
       if (!row) return send(res, 404, { error: 'Song not found' });
       return send(res, 200, { clip: JSON.parse(row.raw_json), first_captured_at: row.first_captured_at, updated_at: row.updated_at });
     }
-    if (!authorized(req)) return send(res, 401, { error: 'Bearer token required' });
+    const isQuery = req.method === 'POST' && url.pathname === '/api/query';
+    if (isQuery) {
+      if (!authorized(req, readToken) && !authorized(req)) return send(res, 401, { error: 'Bearer token required' });
+    } else if (!authorized(req)) return send(res, 401, { error: 'Bearer token required' });
     if (req.method === 'GET' && url.pathname === '/api/songs') {
       const limit = Number(url.searchParams.get('limit') || 100);
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) return send(res, 400, { error: 'limit must be 1..1000' });
       const rows = db.prepare('SELECT id, raw_json FROM songs WHERE id > ? ORDER BY id LIMIT ?').all(url.searchParams.get('after') || '', limit);
       return send(res, 200, { clips: rows.map(row => JSON.parse(row.raw_json)), next_after: rows.length === limit ? rows.at(-1).id : null });
     }
-    if (req.method !== 'POST' || url.pathname !== '/api/ingest') return send(res, 404, { error: 'Not found' });
-    if (!(req.headers['content-type'] || '').startsWith('application/json')) return send(res, 415, { error: 'application/json required' });
+    if (!isQuery && (req.method !== 'POST' || url.pathname !== '/api/ingest')) return send(res, 404, { error: 'Not found' });
+    if (!(req.headers['content-type'] || '').startsWith('application/json')) return send(res, isQuery ? 400 : 415, { error: 'application/json required' });
     const chunks = []; let bytes = 0;
     for await (const chunk of req) {
       bytes += chunk.length;
@@ -268,6 +279,27 @@ const server = http.createServer(async (req, res) => {
     let body;
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { return send(res, 400, { error: 'Invalid JSON' }); }
+    if (isQuery) {
+      if (typeof body?.sql !== 'string' || !body.sql.trim() || body.sql.includes('\0')) {
+        return send(res, 400, { error: 'sql must be a nonempty SQL string without null characters' });
+      }
+      try {
+        const statement = queryDb.prepare(body.sql);
+        // SQLite prepares only the first statement. Permit inert trailing comments and
+        // separators, but never silently discard a second statement.
+        const remaining = body.sql.slice(statement.sourceSQL.length);
+        if (!/^(?:\s|;|--[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)*$/.test(remaining)) {
+          return send(res, 400, { error: 'Run one SQL statement at a time' });
+        }
+        const columns = statement.columns().map(column => column.name);
+        if (!columns.length) return send(res, 400, { error: 'Only read-only queries returning result columns are supported' });
+        statement.setReturnArrays(true);
+        const rows = statement.all();
+        return send(res, 200, { columns, rows });
+      } catch (error) {
+        return send(res, 400, { error: error.message });
+      }
+    }
     try { return send(res, 200, ingest(body?.clips)); }
     catch (error) {
       if (error.message.startsWith('clips must') || error.message.startsWith('Each clip')) return send(res, 400, { error: error.message });
@@ -281,6 +313,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, '127.0.0.1', () => {
   console.log(`Collector: ${base}\nDatabase: ${dbPath}\nInstall in Violentmonkey: ${base}/userscript.user.js`);
 });
-function shutdown() { server.close(() => { db.close(); process.exit(0); }); }
+function shutdown() { server.close(() => { queryDb.close(); db.close(); process.exit(0); }); }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
